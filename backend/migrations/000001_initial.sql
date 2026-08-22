@@ -109,8 +109,35 @@ create table if not exists domain_scraper_profiles (
   domain text not null unique,
   collector_id text,
   status text not null,
-  consecutive_structural_failures integer not null default 0,
+  request_count integer not null default 0,
+  product_count integer not null default 0,
   active_since timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists domain_scraper_products (
+  profile_id text not null references domain_scraper_profiles(id) on delete cascade,
+  url text not null,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  primary key (profile_id, url)
+);
+
+create table if not exists domain_scraper_collectors (
+  id text primary key,
+  profile_id text not null references domain_scraper_profiles(id) on delete cascade,
+  provider text not null,
+  external_collector_id text,
+  status text not null,
+  purpose text not null,
+  url_pattern text,
+  request_count integer not null default 0,
+  success_count integer not null default 0,
+  failure_count integer not null default 0,
+  consecutive_structural_failures integer not null default 0,
+  last_error text,
+  active_since timestamptz,
+  created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
@@ -158,3 +185,6 @@ create table if not exists email_outbox (
 create index if not exists trackers_due_idx on trackers (next_check_at) where status = 'active';
 create index if not exists observations_tracker_time_idx on observations (tracker_id, observed_at);
 create index if not exists sessions_active_idx on sessions (id, expires_at) where revoked_at is null;
+create index if not exists domain_scraper_collectors_profile_status_idx on domain_scraper_collectors (profile_id, provider, status);
+create unique index if not exists domain_scraper_collectors_provider_external_idx on domain_scraper_collectors (provider, external_collector_id) where external_collector_id is not null;
+create unique index if not exists domain_scraper_collectors_one_provisioning_idx on domain_scraper_collectors (profile_id, provider) where status = 'provisioning';

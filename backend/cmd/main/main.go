@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,31 +12,54 @@ import (
 	"clever-consumer/backend/internal/datasource/postgres"
 	apphttp "clever-consumer/backend/internal/http"
 	"clever-consumer/backend/internal/jobs"
+	"clever-consumer/backend/internal/logging"
 	"clever-consumer/backend/internal/scraping"
 	"clever-consumer/backend/internal/services"
+	"go.uber.org/zap"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger, syncLogger, err := logging.New()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "create logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		_ = syncLogger()
+	}()
 
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("load config", "error", err)
+		logger.Errorw("load config", "error", err)
 		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := postgres.Open(ctx, cfg.DatabaseURL)
+	store, err := openPostgresWithRetry(ctx, cfg.DatabaseURL, logger)
 	if err != nil {
-		logger.Error("connect postgres", "error", err)
+		logger.Errorw("connect postgres", "error", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
-	brightData := scraping.NewBrightDataCLI(cfg.BrightDataBinary, cfg.BrightDataTimeout, logger)
-	app := services.NewApplication(store, brightData, logger, cfg)
+	brightData := scraping.NewBrightDataCLI(
+		cfg.BrightDataBinary,
+		cfg.BrightDataAPIKey,
+		cfg.BrightDataZone,
+		cfg.BrightDataAPIBaseURL,
+		cfg.BrightDataTimeout,
+		cfg.BrightDataHealRetries,
+		cfg.BrightDataDatasetSeeds,
+		logger,
+	)
+	scraper := scraping.NewManager(store, brightData, scraping.CollectorThresholds{
+		RequestThreshold: cfg.ScraperCollectorRequestThreshold,
+		ProductThreshold: cfg.ScraperCollectorProductThreshold,
+		MaxPerDomain:     cfg.ScraperCollectorMaxPerDomain,
+	}, logger)
+	app := services.NewApplication(store, scraper, logger, cfg)
 
 	role := cfg.AppRole
 	if role == "worker" || role == "all" {
@@ -48,16 +71,34 @@ func main() {
 		server := apphttp.NewServer(cfg, app, logger)
 		go func() {
 			if err := server.ListenAndServe(); err != nil {
-				logger.Error("http server stopped", "error", err)
+				logger.Errorw("http server stopped", "error", err)
 				stop()
 			}
 		}()
 	}
 
 	<-ctx.Done()
-	logger.Info("shutdown started")
+	logger.Infow("shutdown started")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = app.Shutdown(shutdownCtx)
-	logger.Info("shutdown complete")
+	logger.Infow("shutdown complete")
+}
+
+func openPostgresWithRetry(ctx context.Context, databaseURL string, logger *zap.SugaredLogger) (*postgres.Store, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 10; attempt++ {
+		store, err := postgres.Open(ctx, databaseURL)
+		if err == nil {
+			return store, nil
+		}
+		lastErr = err
+		logger.Warnw("postgres connection failed; retrying", "attempt", attempt, "error", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
+	}
+	return nil, lastErr
 }

@@ -119,10 +119,13 @@ function App() {
 
   async function runNow(tracker: Tracker) {
     setBusy(true)
+    setMessage('')
     try {
       await api.runTracker(tracker.id)
       await refreshTrackers()
       await loadObservations(tracker)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Manual run failed')
     } finally {
       setBusy(false)
     }

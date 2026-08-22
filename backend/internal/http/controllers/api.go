@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -11,15 +10,16 @@ import (
 	"clever-consumer/backend/internal/domain"
 	"clever-consumer/backend/internal/http/middleware"
 	"clever-consumer/backend/internal/services"
+	"go.uber.org/zap"
 )
 
 type API struct {
 	app    *services.Application
 	cfg    config.Config
-	logger *slog.Logger
+	logger *zap.SugaredLogger
 }
 
-func NewAPI(app *services.Application, cfg config.Config, logger *slog.Logger) *API {
+func NewAPI(app *services.Application, cfg config.Config, logger *zap.SugaredLogger) *API {
 	return &API{app: app, cfg: cfg, logger: logger}
 }
 

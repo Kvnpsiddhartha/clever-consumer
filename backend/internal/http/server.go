@@ -1,7 +1,6 @@
 package http
 
 import (
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -9,9 +8,10 @@ import (
 	"clever-consumer/backend/internal/http/controllers"
 	"clever-consumer/backend/internal/http/middleware"
 	"clever-consumer/backend/internal/services"
+	"go.uber.org/zap"
 )
 
-func NewServer(cfg config.Config, app *services.Application, logger *slog.Logger) *http.Server {
+func NewServer(cfg config.Config, app *services.Application, logger *zap.SugaredLogger) *http.Server {
 	mux := http.NewServeMux()
 	api := controllers.NewAPI(app, cfg, logger)
 
@@ -33,7 +33,7 @@ func NewServer(cfg config.Config, app *services.Application, logger *slog.Logger
 	mux.Handle("POST /v1/trackers/{id}/run", protected(http.HandlerFunc(api.RunTracker)))
 	mux.Handle("GET /v1/trackers/{id}/observations", protected(http.HandlerFunc(api.Observations)))
 
-	handler := middleware.CORS(middleware.Correlation(mux))
+	handler := middleware.CORS(middleware.Correlation(middleware.RequestLogger(logger)(mux)))
 	return &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,

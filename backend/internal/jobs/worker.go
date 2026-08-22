@@ -2,8 +2,9 @@ package jobs
 
 import (
 	"context"
-	"log/slog"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type Application interface {
@@ -12,10 +13,10 @@ type Application interface {
 
 type Worker struct {
 	app    Application
-	logger *slog.Logger
+	logger *zap.SugaredLogger
 }
 
-func NewWorker(app Application, logger *slog.Logger) *Worker {
+func NewWorker(app Application, logger *zap.SugaredLogger) *Worker {
 	return &Worker{app: app, logger: logger}
 }
 
@@ -28,7 +29,7 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := w.app.ProcessDueTrackers(ctx); err != nil {
-				w.logger.Warn("process due trackers", "error", err)
+				w.logger.Warnw("process due trackers", "error", err)
 			}
 		}
 	}

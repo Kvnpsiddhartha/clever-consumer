@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"clever-consumer/backend/internal/config"
 	"clever-consumer/backend/internal/domain"
+	"go.uber.org/zap"
 )
 
 type Store interface {
@@ -45,11 +45,11 @@ type Scraper interface {
 type Application struct {
 	store   Store
 	scraper Scraper
-	logger  *slog.Logger
+	logger  *zap.SugaredLogger
 	cfg     config.Config
 }
 
-func NewApplication(store Store, scraper Scraper, logger *slog.Logger, cfg config.Config) *Application {
+func NewApplication(store Store, scraper Scraper, logger *zap.SugaredLogger, cfg config.Config) *Application {
 	return &Application{store: store, scraper: scraper, logger: logger, cfg: cfg}
 }
 
@@ -255,7 +255,7 @@ func (a *Application) ProcessDueTrackers(ctx context.Context) error {
 	}
 	for _, tracker := range trackers {
 		if _, err := a.RunTrackerNow(ctx, tracker.UserID, tracker.ID); err != nil {
-			a.logger.Warn("scheduled tracker run failed", "tracker_id", tracker.ID, "error", err)
+			a.logger.Warnw("scheduled tracker run failed", "tracker_id", tracker.ID, "error", err)
 		}
 	}
 	return nil

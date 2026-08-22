@@ -16,6 +16,16 @@ const (
 	AvailabilityOutOfStock = "out_of_stock"
 	AvailabilityPreorder   = "preorder"
 	AvailabilityUnknown    = "unknown"
+
+	ScraperProfileActive = "active"
+
+	ScraperCollectorActive       = "active"
+	ScraperCollectorProvisioning = "provisioning"
+	ScraperCollectorHealing      = "healing"
+	ScraperCollectorFailed       = "failed"
+
+	ScraperCollectorPurposeDefault   = "default"
+	ScraperCollectorPurposeLoadShard = "load_shard"
 )
 
 type User struct {
@@ -103,4 +113,46 @@ type ScrapeResult struct {
 	Confidence    float64
 	RawRef        string
 	ObservedAt    time.Time
+}
+
+type ScraperProfile struct {
+	ID           string
+	Domain       string
+	Status       string
+	RequestCount int
+	ProductCount int
+	UpdatedAt    time.Time
+}
+
+type ScraperCollector struct {
+	ID                            string
+	ProfileID                     string
+	Provider                      string
+	ExternalCollectorID           string
+	Status                        string
+	Purpose                       string
+	URLPattern                    string
+	RequestCount                  int
+	SuccessCount                  int
+	FailureCount                  int
+	ConsecutiveStructuralFailures int
+	LastError                     string
+	ActiveSince                   *time.Time
+	CreatedAt                     time.Time
+	UpdatedAt                     time.Time
+}
+
+type CollectorThresholds struct {
+	RequestThreshold int
+	ProductThreshold int
+	MaxPerDomain     int
+}
+
+type ScrapeTarget struct {
+	Profile           ScraperProfile
+	Collector         *ScraperCollector
+	Provision         *ScraperCollector
+	ActiveCollectors  int
+	TotalCollectors   int
+	ProvisioningCount int
 }

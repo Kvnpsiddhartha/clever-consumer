@@ -2,7 +2,12 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"clever-consumer/backend/internal/domain"
@@ -23,11 +28,51 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := applyMigrations(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return &Store{pool: pool}, nil
 }
 
 func (s *Store) Close() {
 	s.pool.Close()
+}
+
+func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	dir, err := migrationsDir()
+	if err != nil {
+		return err
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		sqlBytes, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", filepath.Base(file), err)
+		}
+	}
+	return nil
+}
+
+func migrationsDir() (string, error) {
+	candidates := []string{
+		"migrations",
+		filepath.Join("backend", "migrations"),
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("migrations directory not found")
 }
 
 func (s *Store) CreateMagicLink(ctx context.Context, id, email, tokenHash string, expiresAt time.Time) error {
@@ -258,6 +303,306 @@ func (s *Store) DueTrackers(ctx context.Context, now time.Time, limit int) ([]do
 		return nil, err
 	}
 	return s.attachRules(ctx, trackers)
+}
+
+func (s *Store) PrepareScrapeTarget(ctx context.Context, domainName, targetURL, provider string, now time.Time, thresholds domain.CollectorThresholds) (domain.ScrapeTarget, error) {
+	if thresholds.MaxPerDomain <= 0 {
+		thresholds.MaxPerDomain = 1
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var profile domain.ScraperProfile
+	err = tx.QueryRow(ctx, `
+		insert into domain_scraper_profiles (id, domain, status, request_count, product_count, updated_at)
+		values ('dsp_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, 1, 0, $3)
+		on conflict (domain) do update
+		set request_count = domain_scraper_profiles.request_count + 1,
+		    status = $2,
+		    updated_at = $3
+		returning id, domain, status, request_count, product_count, updated_at
+	`, domainName, domain.ScraperProfileActive, now).Scan(&profile.ID, &profile.Domain, &profile.Status, &profile.RequestCount, &profile.ProductCount, &profile.UpdatedAt)
+	if err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+
+	tag, err := tx.Exec(ctx, `
+		insert into domain_scraper_products (profile_id, url, first_seen_at, last_seen_at)
+		values ($1, $2, $3, $3)
+		on conflict (profile_id, url) do nothing
+	`, profile.ID, targetURL, now)
+	if err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+	if tag.RowsAffected() == 1 {
+		err = tx.QueryRow(ctx, `
+			update domain_scraper_profiles
+			set product_count = product_count + 1, updated_at = $2
+			where id = $1
+			returning id, domain, status, request_count, product_count, updated_at
+		`, profile.ID, now).Scan(&profile.ID, &profile.Domain, &profile.Status, &profile.RequestCount, &profile.ProductCount, &profile.UpdatedAt)
+		if err != nil {
+			return domain.ScrapeTarget{}, err
+		}
+	}
+
+	var activeCount, totalCount, provisioningCount int
+	err = tx.QueryRow(ctx, `
+		select
+			count(*) filter (where status = $3 and external_collector_id is not null),
+			count(*) filter (where status in ($3, $4, $5)),
+			count(*) filter (where status = $4)
+		from domain_scraper_collectors
+		where profile_id = $1 and provider = $2
+	`, profile.ID, provider, domain.ScraperCollectorActive, domain.ScraperCollectorProvisioning, domain.ScraperCollectorHealing).Scan(&activeCount, &totalCount, &provisioningCount)
+	if err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+
+	target := domain.ScrapeTarget{
+		Profile:           profile,
+		ActiveCollectors:  activeCount,
+		TotalCollectors:   totalCount,
+		ProvisioningCount: provisioningCount,
+	}
+
+	collector, err := selectActiveCollector(ctx, tx, profile.ID, provider)
+	if err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+	target.Collector = collector
+
+	if shouldProvisionCollector(profile, activeCount, totalCount, provisioningCount, thresholds) {
+		purpose := domain.ScraperCollectorPurposeDefault
+		if activeCount > 0 {
+			purpose = domain.ScraperCollectorPurposeLoadShard
+		}
+		provision, err := insertProvisioningCollector(ctx, tx, profile.ID, provider, purpose, now)
+		if err != nil {
+			return domain.ScrapeTarget{}, err
+		}
+		if provision != nil {
+			target.Provision = provision
+			target.TotalCollectors++
+			target.ProvisioningCount++
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ScrapeTarget{}, err
+	}
+	return target, nil
+}
+
+type queryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func selectActiveCollector(ctx context.Context, q queryer, profileID, provider string) (*domain.ScraperCollector, error) {
+	row := q.QueryRow(ctx, `
+		select id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
+		       request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
+		       active_since, created_at, updated_at
+		from domain_scraper_collectors
+		where profile_id = $1 and provider = $2 and status = $3 and external_collector_id is not null
+		order by consecutive_structural_failures asc, request_count asc, updated_at asc
+		limit 1
+	`, profileID, provider, domain.ScraperCollectorActive)
+	collector, err := scanScraperCollector(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &collector, nil
+}
+
+func insertProvisioningCollector(ctx context.Context, q queryer, profileID, provider, purpose string, now time.Time) (*domain.ScraperCollector, error) {
+	row := q.QueryRow(ctx, `
+		insert into domain_scraper_collectors
+		(id, profile_id, provider, status, purpose, created_at, updated_at)
+		values ('dsc_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3, $4, $5, $5)
+		on conflict do nothing
+		returning id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
+		          request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
+		          active_since, created_at, updated_at
+	`, profileID, provider, domain.ScraperCollectorProvisioning, purpose, now)
+	collector, err := scanScraperCollector(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &collector, nil
+}
+
+func shouldProvisionCollector(profile domain.ScraperProfile, activeCount, totalCount, provisioningCount int, thresholds domain.CollectorThresholds) bool {
+	if provisioningCount > 0 || totalCount >= thresholds.MaxPerDomain {
+		return false
+	}
+	if activeCount == 0 {
+		return totalCount == 0
+	}
+	if thresholds.RequestThreshold > 0 && profile.RequestCount >= activeCount*thresholds.RequestThreshold {
+		return true
+	}
+	if thresholds.ProductThreshold > 0 && profile.ProductCount >= activeCount*thresholds.ProductThreshold {
+		return true
+	}
+	return false
+}
+
+func (s *Store) CompleteCollectorProvisioning(ctx context.Context, collectorID, externalCollectorID string, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set external_collector_id = $2, status = $3, active_since = coalesce(active_since, $4), last_error = null, updated_at = $4
+		where id = $1 and status = $5
+	`, collectorID, externalCollectorID, domain.ScraperCollectorActive, now, domain.ScraperCollectorProvisioning)
+	return err
+}
+
+func (s *Store) ActivateDiscoveredCollector(ctx context.Context, profileID, provider, externalCollectorID, purpose string, now time.Time) (domain.ScraperCollector, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ScraperCollector{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, `
+		update domain_scraper_collectors
+		set external_collector_id = $3, status = $4, purpose = $5, active_since = coalesce(active_since, $6), last_error = null, updated_at = $6
+		where id = (
+			select id from domain_scraper_collectors
+			where profile_id = $1 and provider = $2 and status = $7
+			order by created_at asc
+			limit 1
+		)
+		returning id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
+		          request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
+		          active_since, created_at, updated_at
+	`, profileID, provider, externalCollectorID, domain.ScraperCollectorActive, purpose, now, domain.ScraperCollectorProvisioning)
+	collector, err := scanScraperCollector(row)
+	if err == nil {
+		return collector, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.ScraperCollector{}, err
+	}
+
+	row = tx.QueryRow(ctx, `
+		insert into domain_scraper_collectors
+		(id, profile_id, provider, external_collector_id, status, purpose, active_since, created_at, updated_at)
+		values ('dsc_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3, $4, $5, $6, $6, $6)
+		on conflict (provider, external_collector_id) where external_collector_id is not null
+		do update set profile_id = excluded.profile_id, status = excluded.status, purpose = excluded.purpose, active_since = coalesce(domain_scraper_collectors.active_since, excluded.active_since), last_error = null, updated_at = excluded.updated_at
+		returning id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
+		          request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
+		          active_since, created_at, updated_at
+	`, profileID, provider, externalCollectorID, domain.ScraperCollectorActive, purpose, now)
+	collector, err = scanScraperCollector(row)
+	if err != nil {
+		return domain.ScraperCollector{}, err
+	}
+	return collector, tx.Commit(ctx)
+}
+
+func (s *Store) FailCollectorProvisioning(ctx context.Context, collectorID, message string, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set status = $2, last_error = $3, failure_count = failure_count + 1, updated_at = $4
+		where id = $1
+	`, collectorID, domain.ScraperCollectorFailed, message, now)
+	return err
+}
+
+func (s *Store) RecordCollectorSuccess(ctx context.Context, collectorID string, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set request_count = request_count + 1,
+		    success_count = success_count + 1,
+		    consecutive_structural_failures = 0,
+		    last_error = null,
+		    status = $2,
+		    updated_at = $3
+		where id = $1
+	`, collectorID, domain.ScraperCollectorActive, now)
+	return err
+}
+
+func (s *Store) RecordCollectorFailure(ctx context.Context, collectorID, message string, structural bool, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set request_count = request_count + 1,
+		    failure_count = failure_count + 1,
+		    consecutive_structural_failures = case when $2 then consecutive_structural_failures + 1 else consecutive_structural_failures end,
+		    last_error = $3,
+		    updated_at = $4
+		where id = $1
+	`, collectorID, structural, message, now)
+	return err
+}
+
+func (s *Store) StartCollectorHealing(ctx context.Context, collectorID string, now time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set status = $2, updated_at = $3
+		where id = $1 and status = $4 and external_collector_id is not null
+	`, collectorID, domain.ScraperCollectorHealing, now, domain.ScraperCollectorActive)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) FinishCollectorHealing(ctx context.Context, collectorID, message string, success bool, now time.Time) error {
+	status := domain.ScraperCollectorFailed
+	if success {
+		status = domain.ScraperCollectorActive
+	}
+	_, err := s.pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set status = $2,
+		    last_error = nullif($3, ''),
+		    consecutive_structural_failures = case when $4 then 0 else consecutive_structural_failures end,
+		    updated_at = $5
+		where id = $1
+	`, collectorID, status, message, success, now)
+	return err
+}
+
+func scanScraperCollector(row pgx.Row) (domain.ScraperCollector, error) {
+	var collector domain.ScraperCollector
+	var activeSince sql.NullTime
+	err := row.Scan(
+		&collector.ID,
+		&collector.ProfileID,
+		&collector.Provider,
+		&collector.ExternalCollectorID,
+		&collector.Status,
+		&collector.Purpose,
+		&collector.URLPattern,
+		&collector.RequestCount,
+		&collector.SuccessCount,
+		&collector.FailureCount,
+		&collector.ConsecutiveStructuralFailures,
+		&collector.LastError,
+		&activeSince,
+		&collector.CreatedAt,
+		&collector.UpdatedAt,
+	)
+	if err != nil {
+		return domain.ScraperCollector{}, err
+	}
+	if activeSince.Valid {
+		collector.ActiveSince = &activeSince.Time
+	}
+	return collector, nil
 }
 
 func scanTracker(row pgx.CollectableRow) (domain.Tracker, error) {

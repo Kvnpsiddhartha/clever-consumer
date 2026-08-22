@@ -1,4 +1,40 @@
 services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      APP_ROLE: ${APP_ROLE:-all}
+      HTTP_ADDR: :18080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://clever:clever@postgres:5432/clever_consumer?sslmode=disable
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5173}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-cc_session}
+      BRIGHTDATA_BIN: ${BRIGHTDATA_BIN:-brightdata}
+      BRIGHTDATA_API_BASE_URL: ${BRIGHTDATA_API_BASE_URL:-https://api.brightdata.com}
+      BRIGHTDATA_API_KEY: ${BRIGHTDATA_API_KEY:-}
+      BRIGHTDATA_UNLOCKER_ZONE: ${BRIGHTDATA_UNLOCKER_ZONE:-cli_unlocker}
+      BRIGHTDATA_TIMEOUT_SECONDS: ${BRIGHTDATA_TIMEOUT_SECONDS:-1800}
+      BRIGHTDATA_HEAL_RETRIES: ${BRIGHTDATA_HEAL_RETRIES:-1}
+      BRIGHTDATA_DATASET_SEEDS: ${BRIGHTDATA_DATASET_SEEDS:-}
+      SCRAPER_COLLECTOR_REQUEST_THRESHOLD: ${SCRAPER_COLLECTOR_REQUEST_THRESHOLD:-500}
+      SCRAPER_COLLECTOR_PRODUCT_THRESHOLD: ${SCRAPER_COLLECTOR_PRODUCT_THRESHOLD:-100}
+      SCRAPER_COLLECTOR_MAX_PER_DOMAIN: ${SCRAPER_COLLECTOR_MAX_PER_DOMAIN:-3}
+      SMTP_FROM: ${SMTP_FROM:-alerts@clever-consumer.local}
+    ports:
+      - "18080:18080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18080/healthz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
   postgres:
     image: postgres:17
     environment:
@@ -10,6 +46,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clever -d clever_consumer"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   mailpit:
     image: axllent/mailpit:v1.25
