@@ -14,7 +14,9 @@ type Config struct {
 	DatabaseURL                      string
 	PublicBaseURL                    string
 	SessionCookieName                string
-	BrightDataBinary                 string
+	GoogleClientID                   string
+	GoogleClientSecret               string
+	GoogleRedirectURL                string
 	BrightDataAPIBaseURL             string
 	BrightDataAPIKey                 string
 	BrightDataZone                   string
@@ -34,7 +36,9 @@ func Load() (Config, error) {
 		DatabaseURL:                      os.Getenv("DATABASE_URL"),
 		PublicBaseURL:                    env("PUBLIC_BASE_URL", "http://localhost:5173"),
 		SessionCookieName:                env("SESSION_COOKIE_NAME", "cc_session"),
-		BrightDataBinary:                 env("BRIGHTDATA_BIN", "brightdata"),
+		GoogleClientID:                   os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:               os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:                env("GOOGLE_REDIRECT_URL", "http://localhost:18080/v1/auth/google/callback"),
 		BrightDataAPIBaseURL:             env("BRIGHTDATA_API_BASE_URL", "https://api.brightdata.com"),
 		BrightDataAPIKey:                 os.Getenv("BRIGHTDATA_API_KEY"),
 		BrightDataZone:                   os.Getenv("BRIGHTDATA_UNLOCKER_ZONE"),

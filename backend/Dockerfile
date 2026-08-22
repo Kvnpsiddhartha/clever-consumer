@@ -8,11 +8,10 @@ RUN go mod download
 COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/clever-consumer ./cmd/main
 
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates wget \
-	&& npm install -g @brightdata/cli \
 	&& rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

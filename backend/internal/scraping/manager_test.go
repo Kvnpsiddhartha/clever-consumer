@@ -18,7 +18,8 @@ func TestManagerHealsCollectorOnDataQualityFailure(t *testing.T) {
 		},
 	}
 	provider := &fakeProvider{
-		runErrors: []error{DataQualityError{Err: errors.New("missing price")}},
+		runErrors:  []error{DataQualityError{Err: errors.New("missing price")}},
+		genericErr: errors.New("generic scrape failed"),
 	}
 	manager := NewManager(store, provider, domain.CollectorThresholds{MaxPerDomain: 3}, logging.Nop())
 
@@ -32,6 +33,29 @@ func TestManagerHealsCollectorOnDataQualityFailure(t *testing.T) {
 	if provider.healCalls != 1 || store.startHealingCalls != 1 || store.finishHealingSuccess != 1 {
 		t.Fatalf("expected one successful heal, provider=%d start=%d finish=%d", provider.healCalls, store.startHealingCalls, store.finishHealingSuccess)
 	}
+}
+
+func TestManagerFallsBackToGenericOnCollectorDataQualityFailure(t *testing.T) {
+	store := &fakeCollectorStore{
+		target: domain.ScrapeTarget{
+			Collector: &domain.ScraperCollector{ID: "dsc_1", ExternalCollectorID: "collector_1"},
+		},
+	}
+	provider := &fakeProvider{
+		runErrors: []error{DataQualityError{Err: errors.New("price exceeds supported product price")}},
+	}
+	manager := NewManager(store, provider, domain.CollectorThresholds{MaxPerDomain: 3}, logging.Nop())
+
+	result, err := manager.Scrape(context.Background(), "https://shop.example/products/1", "IN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Method != "fake_generic" {
+		t.Fatalf("expected generic fallback result, got %+v", result)
+	}
+	waitUntil(t, time.Second, func() bool {
+		return provider.healCalls == 1 && store.finishHealingSuccess == 1
+	})
 }
 
 func TestManagerDoesNotHealCommandFailure(t *testing.T) {
@@ -101,7 +125,7 @@ func TestManagerProvisionsCollectorInBackgroundAndReturnsGenericResult(t *testin
 	})
 }
 
-func TestManagerDiscoversStoresAndUsesCollectorBeforeGenericFallback(t *testing.T) {
+func TestManagerReturnsGenericResultAndDiscoversCollectorInBackground(t *testing.T) {
 	store := &fakeCollectorStore{
 		target: domain.ScrapeTarget{
 			Provision: &domain.ScraperCollector{ID: "dsc_pending"},
@@ -116,14 +140,14 @@ func TestManagerDiscoversStoresAndUsesCollectorBeforeGenericFallback(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Method != "fake_collector" {
-		t.Fatalf("expected discovered collector result, got %+v", result)
+	if result.Method != "fake_generic" {
+		t.Fatalf("expected generic result while collector discovery runs, got %+v", result)
 	}
-	if provider.lastCollectorID != "c_shop" {
-		t.Fatalf("expected discovered collector c_shop, got %s", provider.lastCollectorID)
-	}
-	if store.activateDiscoveredCalls != 1 || store.activatedExternalID != "c_shop" {
-		t.Fatalf("expected discovered collector to be stored, calls=%d external=%s", store.activateDiscoveredCalls, store.activatedExternalID)
+	waitUntil(t, time.Second, func() bool {
+		return store.activateDiscoveredCount() == 1
+	})
+	if externalID := store.activatedDiscoveredExternalID(); externalID != "c_shop" {
+		t.Fatalf("expected discovered collector to be stored, calls=%d external=%s", store.activateDiscoveredCount(), externalID)
 	}
 	if provider.createCalls != 0 {
 		t.Fatalf("did not expect background collector creation when discovery succeeds, got %d calls", provider.createCalls)
@@ -157,6 +181,7 @@ func TestManagerRecordsProvisionFailureAfterRequestCancel(t *testing.T) {
 
 type fakeProvider struct {
 	runErrors            []error
+	genericErr           error
 	createErr            error
 	createStarted        chan struct{}
 	createRelease        chan struct{}
@@ -171,6 +196,9 @@ func (f *fakeProvider) Name() string {
 }
 
 func (f *fakeProvider) GenericScrape(ctx context.Context, targetURL, country string) (domain.ScrapeResult, error) {
+	if f.genericErr != nil {
+		return domain.ScrapeResult{}, f.genericErr
+	}
 	return fakeResult(country, "fake_generic"), nil
 }
 
@@ -236,6 +264,18 @@ func (f *fakeCollectorStore) ActivateDiscoveredCollector(ctx context.Context, pr
 	f.activateDiscoveredCalls++
 	f.activatedExternalID = externalCollectorID
 	return domain.ScraperCollector{ID: "dsc_discovered", ProfileID: profileID, Provider: provider, ExternalCollectorID: externalCollectorID, Status: domain.ScraperCollectorActive}, nil
+}
+
+func (f *fakeCollectorStore) activateDiscoveredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activateDiscoveredCalls
+}
+
+func (f *fakeCollectorStore) activatedDiscoveredExternalID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activatedExternalID
 }
 
 func (f *fakeCollectorStore) FailCollectorProvisioning(ctx context.Context, collectorID, message string, now time.Time) error {

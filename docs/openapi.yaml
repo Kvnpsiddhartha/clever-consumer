@@ -46,6 +46,25 @@ paths:
       responses:
         "200":
           description: Session established
+  /v1/auth/google/start:
+    get:
+      responses:
+        "302":
+          description: Redirects to Google OAuth
+  /v1/auth/google/callback:
+    get:
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirects to the web app after Google authentication
   /v1/me:
     get:
       responses:
@@ -127,6 +146,19 @@ paths:
       responses:
         "201":
           description: Tracker created
+  /v1/trackers/{id}:
+    get:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "200":
+          description: Tracker detail
+    delete:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "204":
+          description: Tracker deleted
   /v1/trackers/{id}/pause:
     post:
       parameters:

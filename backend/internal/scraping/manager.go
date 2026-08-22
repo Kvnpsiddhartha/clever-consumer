@@ -64,18 +64,7 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	}
 
 	if target.Collector == nil {
-		if collector, ok := m.discoverCollector(ctx, target, domainName); ok {
-			result, err := m.provider.RunCollector(ctx, collector.ExternalCollectorID, targetURL, country)
-			if err == nil {
-				_ = m.store.RecordCollectorSuccess(ctx, collector.ID, time.Now().UTC())
-				return result, nil
-			}
-			_ = m.store.RecordCollectorFailure(ctx, collector.ID, err.Error(), IsDataQualityError(err), time.Now().UTC())
-			m.logger.Warnw("discovered collector failed; falling back to generic scrape", "domain", domainName, "collector_id", collector.ExternalCollectorID, "error", err)
-		}
-		if target.Provision != nil {
-			m.provisionCollectorInBackground(*target.Provision, targetURL, country, domainName)
-		}
+		m.prepareCollectorInBackground(target, targetURL, country, domainName)
 		return m.provider.GenericScrape(ctx, targetURL, country)
 	}
 
@@ -94,6 +83,10 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	_ = m.store.RecordCollectorFailure(ctx, target.Collector.ID, err.Error(), structural, time.Now().UTC())
 	if !structural {
 		return domain.ScrapeResult{}, err
+	}
+	if result, genericErr := m.provider.GenericScrape(ctx, targetURL, country); genericErr == nil {
+		m.healCollectorInBackground(*target.Collector, targetURL, country, domainName, err)
+		return result, nil
 	}
 
 	healingStarted, startErr := m.store.StartCollectorHealing(ctx, target.Collector.ID, time.Now().UTC())
@@ -119,10 +112,41 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	return result, nil
 }
 
-func (m *Manager) provisionCollectorInBackground(collector domain.ScraperCollector, targetURL, country, domainName string) {
+func (m *Manager) healCollectorInBackground(collector domain.ScraperCollector, targetURL, country, domainName string, scrapeErr error) {
 	go func() {
-		if _, err := m.provisionCollector(context.Background(), collector, targetURL, country, domainName); err != nil {
-			m.logger.Warnw("collector provisioning failed", "domain", domainName, "collector_id", collector.ID, "error", err)
+		storeCtx, cancel := collectorStoreContext()
+		healingStarted, startErr := m.store.StartCollectorHealing(storeCtx, collector.ID, time.Now().UTC())
+		cancel()
+		if startErr != nil {
+			m.logger.Warnw("collector healing start failed", "domain", domainName, "collector_id", collector.ID, "error", startErr)
+			return
+		}
+		if !healingStarted {
+			return
+		}
+		if healErr := m.provider.HealCollector(context.Background(), collector.ExternalCollectorID, targetURL, country, scrapeErr); healErr != nil {
+			storeCtx, cancel = collectorStoreContext()
+			_ = m.store.FinishCollectorHealing(storeCtx, collector.ID, healErr.Error(), false, time.Now().UTC())
+			cancel()
+			m.logger.Warnw("collector healing failed", "domain", domainName, "collector_id", collector.ID, "error", healErr)
+			return
+		}
+		storeCtx, cancel = collectorStoreContext()
+		_ = m.store.FinishCollectorHealing(storeCtx, collector.ID, "", true, time.Now().UTC())
+		cancel()
+	}()
+}
+
+func (m *Manager) prepareCollectorInBackground(target domain.ScrapeTarget, targetURL, country, domainName string) {
+	if target.Provision == nil {
+		return
+	}
+	go func() {
+		if _, ok := m.discoverCollector(context.Background(), target, domainName); ok {
+			return
+		}
+		if _, err := m.provisionCollector(context.Background(), *target.Provision, targetURL, country, domainName); err != nil {
+			m.logger.Warnw("collector provisioning failed", "domain", domainName, "collector_id", target.Provision.ID, "error", err)
 		}
 	}()
 }
@@ -148,20 +172,6 @@ func (m *Manager) discoverCollector(ctx context.Context, target domain.ScrapeTar
 		return domain.ScraperCollector{}, false
 	}
 	return collector, true
-}
-
-func (m *Manager) provisionAndRun(ctx context.Context, collector domain.ScraperCollector, targetURL, country, domainName string) (domain.ScrapeResult, error) {
-	externalID, err := m.provisionCollector(ctx, collector, targetURL, country, domainName)
-	if err != nil {
-		return domain.ScrapeResult{}, err
-	}
-	result, err := m.provider.RunCollector(ctx, externalID, targetURL, country)
-	if err != nil {
-		_ = m.store.RecordCollectorFailure(ctx, collector.ID, err.Error(), IsDataQualityError(err), time.Now().UTC())
-		return domain.ScrapeResult{}, err
-	}
-	_ = m.store.RecordCollectorSuccess(ctx, collector.ID, time.Now().UTC())
-	return result, nil
 }
 
 func (m *Manager) provisionCollector(ctx context.Context, collector domain.ScraperCollector, targetURL, country, domainName string) (string, error) {

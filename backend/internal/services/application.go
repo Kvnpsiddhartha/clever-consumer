@@ -31,6 +31,7 @@ type Store interface {
 	CreateTracker(ctx context.Context, tracker domain.Tracker) error
 	ListTrackers(ctx context.Context, userID string) ([]domain.Tracker, error)
 	Tracker(ctx context.Context, userID, trackerID string) (domain.Tracker, error)
+	DeleteTracker(ctx context.Context, userID, trackerID string) error
 	AddObservation(ctx context.Context, obs domain.Observation) error
 	Observations(ctx context.Context, userID, trackerID string) ([]domain.Observation, error)
 	SetTrackerStatus(ctx context.Context, userID, trackerID, status string) error
@@ -89,6 +90,14 @@ func (a *Application) VerifyMagicLink(ctx context.Context, token string) (domain
 	email, err := a.store.ConsumeMagicLink(ctx, hashToken(strings.TrimSpace(token)), time.Now().UTC())
 	if err != nil {
 		return domain.User{}, "", time.Time{}, err
+	}
+	return a.CreateEmailSession(ctx, email)
+}
+
+func (a *Application) CreateEmailSession(ctx context.Context, email string) (domain.User, string, time.Time, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !strings.Contains(email, "@") {
+		return domain.User{}, "", time.Time{}, errors.New("valid email is required")
 	}
 	user, err := a.store.UpsertUser(ctx, email, "IN", "Asia/Kolkata")
 	if err != nil {
@@ -208,6 +217,14 @@ func (a *Application) CreateTracker(ctx context.Context, userID, previewID strin
 
 func (a *Application) ListTrackers(ctx context.Context, userID string) ([]domain.Tracker, error) {
 	return a.store.ListTrackers(ctx, userID)
+}
+
+func (a *Application) Tracker(ctx context.Context, userID, trackerID string) (domain.Tracker, error) {
+	return a.store.Tracker(ctx, userID, trackerID)
+}
+
+func (a *Application) DeleteTracker(ctx context.Context, userID, trackerID string) error {
+	return a.store.DeleteTracker(ctx, userID, trackerID)
 }
 
 func (a *Application) Observations(ctx context.Context, userID, trackerID string) ([]domain.Observation, error) {

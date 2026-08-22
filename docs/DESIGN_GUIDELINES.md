@@ -10,7 +10,7 @@ The aDL source describes itself as documentation and development guidance for bu
 
 Clever Consumer should feel like a practical commerce utility: direct, structured, trustworthy, and fast to scan. Favor functional layouts over marketing pages. The first screen should expose the working product experience: watchlists, product previews, price history, alerts, and account controls.
 
-Use a restrained Adidas-inspired direction:
+Use a restrained aDL-aligned direction:
 
 - Clear hierarchy.
 - Confident typography.
@@ -22,23 +22,32 @@ Use a restrained Adidas-inspired direction:
 
 Avoid ornamental gradients, decorative blobs, oversized marketing hero layouts, and new visual treatments that do not help product tracking workflows.
 
-## Existing Tokens
+## Local Token Mapping
 
-Reuse the current CSS custom properties in `web/clever-consumer/src/index.css` before adding anything new:
+The public aDL Storybook currently defines black and white as its primary light-surface colors, neutral gray surfaces and dividers, blue for focus/interactive emphasis, green for success, and red for errors. Map those roles to the local tokens in `web/clever-consumer/src/index.css`:
 
 ```css
---bg: #f7f7f4;
+--bg: #ffffff;
 --panel: #ffffff;
---panel-strong: #111827;
---text: #27303f;
---muted: #667085;
---line: #d8ddd5;
---accent: #0f766e;
---accent-strong: #134e4a;
---warning: #9a3412;
+--panel-strong: #000000;
+--text-inverse: #ffffff;
+--surface-subtle: #f5f5f5;
+--surface-medium: #eceff1;
+--surface-error: #fff0f0;
+--text: #000000;
+--muted: #767677;
+--line: #d9dbdd;
+--line-strong: #929396;
+--line-inverse: #3b3b3c;
+--accent: #000000;
+--accent-hover: #1e1e1e;
+--focus: #007bc6;
+--success: #00aa55;
+--warning: #e32b2b;
+--overlay: rgba(0, 0, 0, 0.6);
 ```
 
-Current typography is `Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`. Keep it unless a deliberate typography pass updates all surfaces together.
+The proprietary aDL typeface is not distributed with this project. Use `Arial, Helvetica, sans-serif`, which follows aDL's own fallback stack, and rely on weight and spacing for hierarchy. Do not download or copy Adidas fonts or brand assets.
 
 Do not introduce new colors, font sizes, shadows, or radii for one-off components. If a new token is necessary, add it at `:root`, document why it exists, and apply it consistently across web and extension surfaces where relevant.
 
@@ -62,14 +71,16 @@ The aDL grid reference uses responsive breakpoints and a column system. For this
 
 Current web layout:
 
-- Desktop app shell: `300px` sidebar plus flexible workspace.
+- Desktop app shell: `280px` navigation sidebar, collapsible to a `72px` icon rail, plus a flexible workspace.
 - Mobile breakpoint: `860px`, collapsing to one column.
 - Card grid: `repeat(auto-fill, minmax(300px, 1fr))`.
-- Standard page/workspace padding: `28px`.
+- Standard page/workspace padding: `24px` on compact screens and `32px` on desktop.
 - Standard compact popup padding: `16px`.
-- Standard gaps: `8px`, `12px`, `14px`, `18px`, `22px`, `28px`.
+- Standard aDL-aligned spacing steps: `4px`, `8px`, `16px`, `24px`, `32px`, `40px`, `48px`, `64px`, `80px`.
 
 Use CSS grid for page structure and repeated cards. Use flex only for inline groups that wrap naturally, such as action rows.
+
+Keep the sidebar navigational. Account and scraper configuration belongs in dedicated workspace pages reached from sidebar items, not in forms embedded directly in the sidebar. Keep the sidebar collapse control beside the active workspace title and available in both expanded and minimized states.
 
 When adding responsive behavior:
 
@@ -85,8 +96,10 @@ Reuse existing component patterns before creating new ones.
 
 Buttons:
 
-- Primary buttons use `--accent`, white text, `6px` radius, at least `42px` height on web and `38px` in the extension popup.
-- Secondary buttons use the current pale background, accent text, and line border.
+- Primary buttons use a black fill, white text, square corners, and a `48px` minimum height. High-emphasis primary actions may use the aDL offset outer border treatment.
+- Secondary buttons use a white fill, black text, a black `1px` border, and square corners.
+- Compact and icon buttons may use `40px`; avoid making primary workflow buttons smaller than `48px`.
+- Pair a short action label with a trailing icon when the icon clarifies direction or intent. Do not add an icon only as decoration.
 - Always provide disabled styling with reduced opacity and `not-allowed` cursor.
 - Loading labels should preserve button width where possible.
 
@@ -94,19 +107,20 @@ Forms:
 
 - Labels are stacked above controls.
 - Label text is muted, small, and strongly weighted.
-- Inputs and selects use full width, `1px` line border, `6px` radius, and stable minimum height.
+- Inputs and selects use full width, a neutral `1px` border, square corners, and a stable `48px` minimum height.
+- Hover and active input borders become black. Focus uses the shared blue focus token without changing layout.
 - Required, error, hint, and success states must be visually and semantically distinct.
 
 Cards and panels:
 
 - Use cards for individual repeated items, previews, history panels, profile panels, and modal-like content.
-- Keep the existing `8px` panel radius and `1px` border.
+- Use square corners for operational product cards and modal panels. A `4px` or `8px` radius is reserved for components whose meaning benefits from it, such as tags or status badges.
 - Do not nest cards inside cards.
 - Keep operational screens dense but breathable.
 
 Status and metadata:
 
-- Eyebrows and statuses use uppercase text, strong weight, and accent-strong color.
+- Eyebrows and statuses use uppercase text, strong weight, and the primary or semantic status color.
 - Prices are prominent but not hero-sized outside a true product detail context.
 - Metadata should use muted color and line-height around `1.45`.
 
@@ -116,8 +130,10 @@ aDL recommends standalone icon components over sprite-based icon rendering becau
 
 For this repo:
 
-- Use the existing icon system first if one is already present.
+- Use `lucide-react` as the public standalone React icon source. The official `@adl/iconography` package referenced by aDL is not publicly installable for this project.
 - Prefer component-based icons over hand-authored SVGs for controls.
+- Use a consistent `20px` control icon size and `1.75px` stroke; use `24px` only where the larger icon has a clear hierarchy role.
+- Navigation uses familiar icons with visible text. Icon-only menu and close controls use tooltips and accessible names.
 - Icon-only buttons need accessible names.
 - Decorative icons must be hidden from assistive technology.
 - Size icons intentionally and align them to the text baseline or button center.
@@ -161,3 +177,8 @@ Before modifying UI:
 7. Confirm text does not overflow or overlap.
 8. Keep changes scoped to the requested workflow.
 
+## Source Notes
+
+The mapping above was checked against the current public aDL Storybook metadata and styles on 2026-08-22. Relevant source sections are `Theming/Overview`, `Core Components/Button`, `Core Components/Button Icon`, `Core Components/Input Text`, `Core Components/Tag`, `Iconography/Overview`, and `Grid`.
+
+Do not copy Adidas trademarks, product imagery, private packages, or proprietary fonts. Reuse the system's interaction and token principles while keeping Clever Consumer's own identity and content.

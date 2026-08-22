@@ -1,21 +1,58 @@
 # Clever Consumer
 
-Production-minded MVP for tracking product prices from public product URLs.
+If you are someone who wants to track products and price changes, Clever Consumer is just the right tool for you.
+
+Clever Consumer is a tool for tracking product prices from public product URLs. It combines a Go API, PostgreSQL-backed tracking state, a React web app, and a Chrome extension so a user can preview a product page, create a tracker, review price observations, and receive alert emails when rules match.
+
+The project is organized around three local surfaces:
+
+- Backend API: Go service on `http://localhost:18080`.
+- Web app: Vite React app on `http://localhost:5173`.
+- Chrome extension: MV3 popup built from `extension/chrome/`.
+
+Local Docker services also include Postgres on `localhost:55432` and Mailpit at `http://localhost:8025` for inspecting email.
 
 ## What Is Implemented
 
-- Go backend under `backend/` with the requested `cmd/main/main.go`, HTTP controllers, service layer, Postgres datasource, scheduler worker, Bright Data CLI wrapper, and email boundary.
+- Go backend under `backend/` with the requested `cmd/main/main.go`, HTTP controllers, service layer, Postgres datasource, scheduler worker, Bright Data API provider, and email boundary.
 - PostgreSQL schema for users, sessions, previews, trackers, rules, observations, durable jobs, email outbox, scraper profiles, and healing attempts.
 - React/TypeScript web app under `web/clever-consumer/` with magic-link auth, profile settings, URL preview, tracker creation, dashboard actions, and observation history.
 - Chrome MV3 popup under `extension/chrome/` that captures the active tab URL and creates trackers through the backend API.
 - OpenAPI draft at `docs/openapi.yaml`.
 
-## Local Setup
+## Run Locally
 
-Start the backend, Postgres, and Mailpit:
+Prerequisites:
+
+- Docker with Docker Compose.
+- `pnpm` for the web app and Chrome extension.
+- Go only if you plan to run backend tests outside Docker.
+
+### 1. Start Backend Services
+
+Start the Go backend, Postgres, and Mailpit:
 
 ```sh
 make up
+```
+
+Check service status and logs:
+
+```sh
+make ps
+make backend-logs
+```
+
+The backend health endpoint should respond at:
+
+```sh
+http://localhost:18080/healthz
+```
+
+Mailpit is available at:
+
+```sh
+http://localhost:8025
 ```
 
 Useful local commands:
@@ -27,6 +64,8 @@ make backend-logs
 make down
 ```
 
+### 2. Run The Web App
+
 Run the web app:
 
 ```sh
@@ -34,6 +73,36 @@ cd web/clever-consumer
 pnpm install
 pnpm dev
 ```
+
+Open the app at:
+
+```sh
+http://localhost:5173
+```
+
+### 3. Optional Google Sign-In
+
+Magic-link auth works with the local backend and Mailpit. Google sign-in uses the same backend session cookie as magic links. Configure a Google OAuth client with this local redirect URI:
+
+```sh
+http://localhost:18080/v1/auth/google/callback
+```
+
+Set these environment variables in your shell before starting or restarting the backend:
+
+```sh
+export GOOGLE_CLIENT_ID='<your-client-id>'
+export GOOGLE_CLIENT_SECRET='<your-client-secret>'
+export GOOGLE_REDIRECT_URL='http://localhost:18080/v1/auth/google/callback'
+```
+
+Apply the new values to Docker Compose:
+
+```sh
+make restart
+```
+
+### 4. Optional Chrome Extension
 
 Build the Chrome extension:
 
@@ -53,38 +122,37 @@ By default, the backend discovers existing Bright Data Scraper Studio collectors
 BRIGHTDATA_DATASET_SEEDS=adidas.co.in:gd_xxxxxxxxxxxxxxxx,amazon.in:gd_yyyyyyyyyyyyyyyy
 ```
 
-When no dataset or discovered collector matches, the backend calls Bright Data through a typed argument array:
+When no dataset or discovered collector matches, the backend calls the Bright Data Unlocker API directly:
 
 ```sh
-brightdata scrape <url> --format json --country <country>
+POST /request
 ```
 
-It does not create fallback prices. If the CLI is missing, authentication fails, or the scrape response lacks required product fields, preview creation fails with an explicit error.
+It does not create fallback prices. If authentication fails, the Unlocker zone is missing, or the scrape response lacks required product fields, preview creation fails with an explicit error.
 
 The backend also maintains provider-agnostic domain scraper profiles. Each domain can have multiple collectors in `domain_scraper_collectors`. The first request for a new domain returns from the generic scrape path, while the backend provisions one collector in the background with:
 
 ```sh
-brightdata scraper create <url> "<product extraction description>" --json
+POST /dca/collector
+POST /dca/collectors/<collector-id>/automate_template
+GET /dca/collectors/<collector-id>/automate_template/progress
 ```
 
-Later requests route to a healthy collector for that domain once provisioning completes, using the Scraper Studio API when the collector id starts with `c_`:
+Later requests route to a healthy collector for that domain once provisioning completes, using the Scraper Studio API:
 
 ```sh
-brightdata scraper run <collector-id> <url> --json
+POST /dca/trigger?collector=<collector-id>&queue_next=1
+GET /dca/dataset?id=<collection-id>
 ```
 
 When domain traffic crosses `SCRAPER_COLLECTOR_REQUEST_THRESHOLD` or distinct product count crosses `SCRAPER_COLLECTOR_PRODUCT_THRESHOLD`, the backend provisions another collector for the same domain, up to `SCRAPER_COLLECTOR_MAX_PER_DOMAIN`. Provisioning is guarded in Postgres so concurrent requests do not create duplicate collectors.
 
-If a collector run succeeds but returns invalid product data, the backend marks that collector as healing, calls `brightdata scraper heal` with `--auto-approve`, then retries the same collector. Authentication, missing CLI, zone, and other command failures do not trigger healing. Other requests can route to another active collector for the domain where one exists.
-
-Install and authenticate the CLI:
+If a collector run succeeds but returns invalid product data, the backend marks that collector as healing, calls the Scraper Studio self-healing API, auto-approves the fix when Bright Data returns an approval gate, then retries the same collector. Authentication, zone, and other command failures do not trigger healing. Other requests can route to another active collector for the domain where one exists.
 
 ```sh
-npm install -g @brightdata/cli
-brightdata login
-brightdata config
-brightdata budget
-brightdata scrape https://www.adidas.co.in/predator-pro-fold-over-tongue-turf-football-shoes/JR7866.html --format json --country in
+POST /dca/collectors/<collector-id>/refactor_template
+GET /dca/collectors/<collector-id>/refactor_template/progress
+POST /dca/collectors/<collector-id>/resume_automation_job
 ```
 
 For non-interactive local runs, set these environment variables before starting the backend:
@@ -104,6 +172,6 @@ When running through Docker Compose, these variables can be exported in your she
 
 ```sh
 make test
-cd web/clever-consumer && npm run typecheck && npm run build
-cd extension/chrome && npm run typecheck && npm run build
+cd web/clever-consumer && pnpm run typecheck && pnpm run build
+cd extension/chrome && pnpm run typecheck && pnpm run build
 ```

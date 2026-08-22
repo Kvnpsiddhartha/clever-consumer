@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type BrightDataCLI struct {
-	binary      string
+type BrightDataAPI struct {
 	apiKey      string
 	zone        string
 	apiBaseURL  string
@@ -31,9 +30,8 @@ type BrightDataCLI struct {
 	logger      *zap.SugaredLogger
 }
 
-func NewBrightDataCLI(binary, apiKey, zone, apiBaseURL string, timeout time.Duration, healRetries int, datasets map[string]string, logger *zap.SugaredLogger) *BrightDataCLI {
-	return &BrightDataCLI{
-		binary:      binary,
+func NewBrightDataAPI(apiKey, zone, apiBaseURL string, timeout time.Duration, healRetries int, datasets map[string]string, logger *zap.SugaredLogger) *BrightDataAPI {
+	return &BrightDataAPI{
 		apiKey:      apiKey,
 		zone:        zone,
 		apiBaseURL:  strings.TrimRight(apiBaseURL, "/"),
@@ -45,76 +43,47 @@ func NewBrightDataCLI(binary, apiKey, zone, apiBaseURL string, timeout time.Dura
 	}
 }
 
-func (b *BrightDataCLI) Name() string {
+func (b *BrightDataAPI) Name() string {
 	return "brightdata"
 }
 
-func (b *BrightDataCLI) GenericScrape(ctx context.Context, targetURL, country string) (domain.ScrapeResult, error) {
+func (b *BrightDataAPI) GenericScrape(ctx context.Context, targetURL, country string) (domain.ScrapeResult, error) {
 	if datasetID, ok := b.DatasetID(domainFromURL(targetURL)); ok {
 		return b.scrapeDataset(ctx, datasetID, targetURL, country)
 	}
-	args := []string{"scrape", targetURL, "--format", "json", "--country", strings.ToLower(country)}
-	if b.zone != "" {
-		args = append(args, "--zone", b.zone)
-	}
-	out, err := b.run(ctx, args)
-	if err != nil {
-		return domain.ScrapeResult{}, b.commandError(err, out)
-	}
-	return decodeProductResult(out, targetURL, country, "brightdata_generic")
+	return b.scrapeUnlocker(ctx, targetURL, country)
 }
 
-func (b *BrightDataCLI) CreateCollector(ctx context.Context, targetURL, country, domainName, purpose string) (string, error) {
+func (b *BrightDataAPI) CreateCollector(ctx context.Context, targetURL, country, domainName, purpose string) (string, error) {
 	name := fmt.Sprintf("cc-%s-%s", sanitizeCollectorName(domainName), purpose)
-	description := "Extract product title, current price, currency, image URL, canonical URL, and availability from this product detail page. Return structured JSON with fields name, price or current_price, currency, image_url, url, and availability."
-	args := []string{
-		"scraper", "create", targetURL, description,
-		"--name", name,
-		"--json",
-		"--max-retries", strconv.Itoa(b.healRetries),
-		"--timeout", strconv.Itoa(int(b.timeout.Seconds())),
-	}
-	out, err := b.run(ctx, args)
+	description := scraperDescription()
+	collectorID, err := b.createScraperTemplate(ctx, name)
 	if err != nil {
-		return "", b.commandError(err, out)
+		return "", err
 	}
-	payload, err := firstJSONValue(out)
+	endpoint := b.apiURL("/dca/collectors/"+url.PathEscape(collectorID)+"/automate_template", nil)
+	_, err = b.apiRequestWithRetry(ctx, http.MethodPost, endpoint, map[string]any{
+		"description": truncateString(description, 500),
+		"urls":        []string{targetURL},
+	})
 	if err != nil {
-		return "", fmt.Errorf("Bright Data scraper create returned invalid JSON: %w", err)
+		return "", err
 	}
-	var envelope struct {
-		CollectorID string `json:"collector_id"`
-		Error       string `json:"error"`
-	}
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return "", fmt.Errorf("Bright Data scraper create returned invalid JSON: %w", err)
-	}
-	if envelope.CollectorID == "" {
-		if envelope.Error != "" {
-			return "", fmt.Errorf("Bright Data scraper create failed: %s", envelope.Error)
-		}
-		return "", errors.New("Bright Data scraper create did not return a collector_id")
-	}
-	return envelope.CollectorID, nil
+	return collectorID, b.pollAIFlow(ctx, collectorID, "automate_template")
 }
 
-func (b *BrightDataCLI) RunCollector(ctx context.Context, collectorID, targetURL, country string) (domain.ScrapeResult, error) {
-	if strings.HasPrefix(collectorID, "c_") && b.apiKey != "" {
-		return b.runScraperStudioCollector(ctx, collectorID, targetURL, country)
-	}
-	args := []string{"scraper", "run", collectorID, targetURL, "--json", "--timeout", strconv.Itoa(int(b.timeout.Seconds()))}
-	out, err := b.run(ctx, args)
-	if err != nil {
-		return domain.ScrapeResult{}, b.commandError(err, out)
-	}
-	return decodeProductResult(out, targetURL, country, "brightdata_collector")
+func (b *BrightDataAPI) RunCollector(ctx context.Context, collectorID, targetURL, country string) (domain.ScrapeResult, error) {
+	return b.runScraperStudioCollector(ctx, collectorID, targetURL, country)
 }
 
-func (b *BrightDataCLI) DatasetID(domainName string) (string, bool) {
-	return lookupDomainMap(b.datasets, domainName)
+func (b *BrightDataAPI) DatasetID(domainName string) (string, bool) {
+	if datasetID, ok := lookupDomainMap(b.datasets, domainName); ok {
+		return datasetID, true
+	}
+	return defaultDatasetID(domainName)
 }
 
-func (b *BrightDataCLI) DiscoverCollectors(ctx context.Context, domainName string) ([]DiscoveredCollector, error) {
+func (b *BrightDataAPI) DiscoverCollectors(ctx context.Context, domainName string) ([]DiscoveredCollector, error) {
 	domainName = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domainName)), "www.")
 	if domainName == "" {
 		return nil, nil
@@ -151,69 +120,31 @@ func (b *BrightDataCLI) DiscoverCollectors(ctx context.Context, domainName strin
 	return discovered, nil
 }
 
-func (b *BrightDataCLI) HealCollector(ctx context.Context, collectorID, targetURL, country string, scrapeErr error) error {
-	args := []string{
-		"scraper", "heal", collectorID, healingPrompt(targetURL, country, scrapeErr),
-		"--url", targetURL,
-		"--auto-approve",
-		"--json",
-		"--max-retries", strconv.Itoa(b.healRetries),
-		"--timeout", strconv.Itoa(int(b.timeout.Seconds())),
-	}
-	out, err := b.run(ctx, args)
+func (b *BrightDataAPI) HealCollector(ctx context.Context, collectorID, targetURL, country string, scrapeErr error) error {
+	endpoint := b.apiURL("/dca/collectors/"+url.PathEscape(collectorID)+"/refactor_template", nil)
+	_, err := b.apiRequestWithRetry(ctx, http.MethodPost, endpoint, map[string]any{
+		"prompt":       healingPrompt(targetURL, country, scrapeErr),
+		"custom_input": []map[string]string{{"url": targetURL}},
+	})
 	if err != nil {
-		return b.commandError(err, out)
+		return err
+	}
+	status, err := b.pollAIFlowStatus(ctx, collectorID, "refactor_template")
+	if err != nil {
+		return err
+	}
+	if status == "awaiting_approval" || status == "pending_answer" || status == "user_approval" {
+		approveURL := b.apiURL("/dca/collectors/"+url.PathEscape(collectorID)+"/resume_automation_job", nil)
+		if _, err := b.apiRequest(ctx, http.MethodPost, approveURL, map[string]any{"approve": true, "auto_save": true}); err != nil {
+			return err
+		}
+		_, err = b.pollAIFlowStatus(ctx, collectorID, "refactor_template")
+		return err
 	}
 	return nil
 }
 
-func (b *BrightDataCLI) run(ctx context.Context, args []string) ([]byte, error) {
-	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(runCtx, b.binary, args...)
-	cmd.Env = os.Environ()
-	if b.apiKey != "" {
-		cmd.Env = append(cmd.Env, "BRIGHTDATA_API_KEY="+b.apiKey)
-	}
-	if b.zone != "" {
-		cmd.Env = append(cmd.Env, "BRIGHTDATA_UNLOCKER_ZONE="+b.zone)
-	}
-	out, err := cmd.CombinedOutput()
-	if runCtx.Err() != nil {
-		return out, runCtx.Err()
-	}
-	return out, err
-}
-
-func (b *BrightDataCLI) commandError(err error, out []byte) error {
-	b.logger.Warnw("bright data command failed", "error", err, "output_preview", outputPreview(out))
-	var execErr *exec.Error
-	if errors.As(err, &execErr) {
-		return fmt.Errorf("Bright Data CLI is not installed or not on PATH; install @brightdata/cli or set BRIGHTDATA_BIN")
-	}
-	output := strings.ToLower(string(out))
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("Bright Data command timed out after %s; increase BRIGHTDATA_TIMEOUT_SECONDS for scraper creation", b.timeout)
-	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("Bright Data command was canceled before completion")
-	case strings.Contains(output, "invalid") && strings.Contains(output, "api"):
-		return fmt.Errorf("Bright Data API key is invalid or expired; refresh BRIGHTDATA_API_KEY or run brightdata login again")
-	case strings.Contains(output, "expired") && strings.Contains(output, "api"):
-		return fmt.Errorf("Bright Data API key is invalid or expired; refresh BRIGHTDATA_API_KEY or run brightdata login again")
-	case strings.Contains(output, "access denied"):
-		return fmt.Errorf("Bright Data access denied; check API key permissions and Web Unlocker zone access")
-	case strings.Contains(output, "no web unlocker zone"):
-		return fmt.Errorf("Bright Data Web Unlocker zone is not configured; run brightdata login or set BRIGHTDATA_UNLOCKER_ZONE")
-	case strings.Contains(output, "rate limit"):
-		return fmt.Errorf("Bright Data rate limit exceeded; retry later or increase the zone limit")
-	default:
-		return fmt.Errorf("Bright Data command failed; verify CLI authentication, API key, and Web Unlocker zone")
-	}
-}
-
-func (b *BrightDataCLI) scrapeDataset(ctx context.Context, datasetID, targetURL, country string) (domain.ScrapeResult, error) {
+func (b *BrightDataAPI) scrapeDataset(ctx context.Context, datasetID, targetURL, country string) (domain.ScrapeResult, error) {
 	payload := []map[string]string{{"url": targetURL}}
 	endpoint := b.apiURL("/datasets/v3/scrape", map[string]string{
 		"dataset_id": datasetID,
@@ -233,7 +164,43 @@ func (b *BrightDataCLI) scrapeDataset(ctx context.Context, datasetID, targetURL,
 	return b.pollDatasetSnapshot(ctx, snapshotID, targetURL, country)
 }
 
-func (b *BrightDataCLI) pollDatasetSnapshot(ctx context.Context, snapshotID, targetURL, country string) (domain.ScrapeResult, error) {
+func (b *BrightDataAPI) scrapeUnlocker(ctx context.Context, targetURL, country string) (domain.ScrapeResult, error) {
+	if b.zone == "" {
+		return domain.ScrapeResult{}, errors.New("BRIGHTDATA_UNLOCKER_ZONE is required for Bright Data Unlocker API requests")
+	}
+	out, err := b.apiRequest(ctx, http.MethodPost, b.apiURL("/request", nil), map[string]any{
+		"zone":    b.zone,
+		"url":     targetURL,
+		"format":  "json",
+		"country": strings.ToLower(country),
+	})
+	if err != nil {
+		return domain.ScrapeResult{}, err
+	}
+	return decodeProductResult(out, targetURL, country, "brightdata_generic_api")
+}
+
+func (b *BrightDataAPI) createScraperTemplate(ctx context.Context, name string) (string, error) {
+	out, err := b.apiRequest(ctx, http.MethodPost, b.apiURL("/dca/collector", nil), map[string]any{
+		"name": name,
+		"deliver": map[string]any{
+			"type":          "webhook",
+			"endpoint":      "https://example.com/webhook",
+			"flatten_csv":   false,
+			"delivery_type": "deliver_results",
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	collectorID := collectorIDFromTemplateBody(out)
+	if collectorID == "" {
+		return "", errors.New("Bright Data scraper create did not return a collector id")
+	}
+	return collectorID, nil
+}
+
+func (b *BrightDataAPI) pollDatasetSnapshot(ctx context.Context, snapshotID, targetURL, country string) (domain.ScrapeResult, error) {
 	progressURL := b.apiURL("/datasets/v3/progress/"+url.PathEscape(snapshotID), nil)
 	snapshotURL := b.apiURL("/datasets/v3/snapshot/"+url.PathEscape(snapshotID), map[string]string{"format": "json"})
 	ticker := time.NewTicker(5 * time.Second)
@@ -266,7 +233,7 @@ func (b *BrightDataCLI) pollDatasetSnapshot(ctx context.Context, snapshotID, tar
 	}
 }
 
-func (b *BrightDataCLI) runScraperStudioCollector(ctx context.Context, collectorID, targetURL, country string) (domain.ScrapeResult, error) {
+func (b *BrightDataAPI) runScraperStudioCollector(ctx context.Context, collectorID, targetURL, country string) (domain.ScrapeResult, error) {
 	triggerURL := b.apiURL("/dca/trigger", map[string]string{
 		"collector":  collectorID,
 		"queue_next": "1",
@@ -283,7 +250,7 @@ func (b *BrightDataCLI) runScraperStudioCollector(ctx context.Context, collector
 	return b.pollScraperStudioDataset(ctx, collectionID, targetURL, country)
 }
 
-func (b *BrightDataCLI) pollScraperStudioDataset(ctx context.Context, collectionID, targetURL, country string) (domain.ScrapeResult, error) {
+func (b *BrightDataAPI) pollScraperStudioDataset(ctx context.Context, collectionID, targetURL, country string) (domain.ScrapeResult, error) {
 	datasetURL := b.apiURL("/dca/dataset", map[string]string{"id": collectionID})
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -311,7 +278,71 @@ func (b *BrightDataCLI) pollScraperStudioDataset(ctx context.Context, collection
 	}
 }
 
-func (b *BrightDataCLI) apiRequest(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
+func (b *BrightDataAPI) pollAIFlow(ctx context.Context, collectorID, flow string) error {
+	status, err := b.pollAIFlowStatus(ctx, collectorID, flow)
+	if err != nil {
+		return err
+	}
+	if status != "done" && status != "ready" && status != "completed" && status != "success" && status != "finished" {
+		return fmt.Errorf("Bright Data %s for collector %s stopped with status %q", flow, collectorID, status)
+	}
+	return nil
+}
+
+func (b *BrightDataAPI) pollAIFlowStatus(ctx context.Context, collectorID, flow string) (string, error) {
+	progressURL := b.apiURL("/dca/collectors/"+url.PathEscape(collectorID)+"/"+flow+"/progress", nil)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	deadline := time.NewTimer(b.timeout)
+	defer deadline.Stop()
+	for {
+		out, err := b.apiRequest(ctx, http.MethodGet, progressURL, nil)
+		if err != nil {
+			return "", err
+		}
+		status := statusFromBody(out)
+		step := stepFromBody(out)
+		switch {
+		case isDoneStatus(status):
+			return status, nil
+		case isAwaitingApproval(status, step):
+			if step == "user_approval" {
+				return step, nil
+			}
+			return status, nil
+		case isFailedStatus(status):
+			return "", fmt.Errorf("Bright Data %s for collector %s failed with status %q", flow, collectorID, status)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+			return "", fmt.Errorf("Bright Data %s for collector %s timed out after %s", flow, collectorID, b.timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *BrightDataAPI) apiRequestWithRetry(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 0; attempt <= b.healRetries; attempt++ {
+		out, err = b.apiRequest(ctx, method, endpoint, body)
+		var apiErr BrightDataAPIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests || attempt == b.healRetries {
+			return out, err
+		}
+		wait := time.Duration(1<<attempt) * time.Second
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return out, err
+}
+
+func (b *BrightDataAPI) apiRequest(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
 	if b.apiKey == "" {
 		return nil, errors.New("BRIGHTDATA_API_KEY is required for Bright Data API requests")
 	}
@@ -341,12 +372,23 @@ func (b *BrightDataCLI) apiRequest(ctx context.Context, method, endpoint string,
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Bright Data API %s %s returned %d: %s", method, endpoint, resp.StatusCode, outputPreview(out))
+		return nil, BrightDataAPIError{Method: method, Endpoint: endpoint, StatusCode: resp.StatusCode, Body: outputPreview(out)}
 	}
 	return out, nil
 }
 
-func (b *BrightDataCLI) apiURL(path string, query map[string]string) string {
+type BrightDataAPIError struct {
+	Method     string
+	Endpoint   string
+	StatusCode int
+	Body       string
+}
+
+func (e BrightDataAPIError) Error() string {
+	return fmt.Sprintf("Bright Data API %s %s returned %d: %s", e.Method, e.Endpoint, e.StatusCode, e.Body)
+}
+
+func (b *BrightDataAPI) apiURL(path string, query map[string]string) string {
 	base := b.apiBaseURL
 	if base == "" {
 		base = "https://api.brightdata.com"
@@ -362,22 +404,26 @@ func (b *BrightDataCLI) apiURL(path string, query map[string]string) string {
 }
 
 type genericScrapeOutput struct {
-	Name         string `json:"name"`
-	Title        string `json:"title"`
-	ProductName  string `json:"product_name"`
-	URL          string `json:"url"`
-	ProductURL   string `json:"product_url"`
-	Image        string `json:"image"`
-	ImageURL     string `json:"image_url"`
-	MainImage    string `json:"main_image"`
-	Price        any    `json:"price"`
-	CurrentPrice any    `json:"current_price"`
-	FinalPrice   any    `json:"final_price"`
-	Currency     any    `json:"currency"`
-	CurrencyCode any    `json:"currency_code"`
-	Availability any    `json:"availability"`
-	StockStatus  any    `json:"stock_status"`
+	Name          any `json:"name"`
+	Title         any `json:"title"`
+	ProductName   any `json:"product_name"`
+	URL           any `json:"url"`
+	ProductURL    any `json:"product_url"`
+	Image         any `json:"image"`
+	ImageURL      any `json:"image_url"`
+	MainImage     any `json:"main_image"`
+	Price         any `json:"price"`
+	CurrentPrice  any `json:"current_price"`
+	FinalPrice    any `json:"final_price"`
+	Currency      any `json:"currency"`
+	CurrencyCode  any `json:"currency_code"`
+	PriceCurrency any `json:"priceCurrency"`
+	Availability  any `json:"availability"`
+	StockStatus   any `json:"stock_status"`
+	Offers        any `json:"offers"`
 }
+
+const maxSupportedProductPrice = 9_999_999_999.99
 
 func decodeProductResult(out []byte, targetURL, country, method string) (domain.ScrapeResult, error) {
 	parsed, err := decodeGenericScrape(out)
@@ -391,23 +437,28 @@ func decodeProductResult(out []byte, targetURL, country, method string) (domain.
 	if price == 0 {
 		price = numberValue(parsed.FinalPrice)
 	}
-	name := parsed.Name
+	if price == 0 {
+		price = numberValue(offerField(parsed.Offers, "price", "current_price", "final_price", "amount"))
+	}
+	name := firstStringValue(parsed.Name)
 	if name == "" {
-		name = parsed.Title
+		name = firstStringValue(parsed.Title)
 	}
 	if name == "" {
-		name = parsed.ProductName
+		name = firstStringValue(parsed.ProductName)
 	}
-	image := parsed.ImageURL
+	image := firstStringValue(parsed.ImageURL)
 	if image == "" {
-		image = parsed.Image
+		image = firstStringValue(parsed.Image)
 	}
 	if image == "" {
-		image = parsed.MainImage
+		image = firstStringValue(parsed.MainImage)
 	}
 	currency := coalesce(
-		stringValue(parsed.Currency),
-		stringValue(parsed.CurrencyCode),
+		firstStringValue(parsed.Currency),
+		firstStringValue(parsed.CurrencyCode),
+		firstStringValue(parsed.PriceCurrency),
+		firstStringValue(offerField(parsed.Offers, "priceCurrency", "price_currency", "currency", "currency_code")),
 		currencyFromPrice(parsed.CurrentPrice),
 		currencyFromPrice(parsed.Price),
 		currencyFromPrice(parsed.FinalPrice),
@@ -418,13 +469,20 @@ func decodeProductResult(out []byte, targetURL, country, method string) (domain.
 	if price <= 0 {
 		return domain.ScrapeResult{}, DataQualityError{Err: errors.New("scrape result missing a valid product price")}
 	}
-	availability := coalesce(availabilityValue(parsed.Availability), availabilityValue(parsed.StockStatus))
+	if price > maxSupportedProductPrice {
+		return domain.ScrapeResult{}, DataQualityError{Err: fmt.Errorf("scrape result price %.2f exceeds supported product price", price)}
+	}
+	availability := coalesce(
+		availabilityValue(parsed.Availability),
+		availabilityValue(parsed.StockStatus),
+		availabilityValue(offerField(parsed.Offers, "availability", "stock_status")),
+	)
 	if availability == "" {
 		availability = domain.AvailabilityUnknown
 	}
 	return domain.ScrapeResult{
 		Name:         name,
-		CanonicalURL: coalesce(parsed.URL, parsed.ProductURL, targetURL),
+		CanonicalURL: coalesce(firstStringValue(parsed.URL), firstStringValue(parsed.ProductURL), firstStringValue(offerField(parsed.Offers, "url")), targetURL),
 		ImageURL:     image,
 		CurrentPrice: price,
 		Currency:     strings.ToUpper(currency),
@@ -445,6 +503,9 @@ func healingPrompt(targetURL, country string, scrapeErr error) string {
 }
 
 func decodeGenericScrape(out []byte) (genericScrapeOutput, error) {
+	if bytes.HasPrefix(bytes.TrimSpace(out), []byte("<")) {
+		return decodeProductHTML(out)
+	}
 	payload, err := firstJSONValue(out)
 	if err != nil {
 		return genericScrapeOutput{}, err
@@ -452,19 +513,55 @@ func decodeGenericScrape(out []byte) (genericScrapeOutput, error) {
 	if err := brightDataPayloadError(payload); err != nil {
 		return genericScrapeOutput{}, err
 	}
+	if unwrapped, ok := unlockerBodyPayload(payload); ok {
+		payload = unwrapped
+		if err := brightDataPayloadError(payload); err != nil {
+			return genericScrapeOutput{}, err
+		}
+	}
 
-	var parsed genericScrapeOutput
-	if err := json.Unmarshal(payload, &parsed); err == nil && hasProductFields(parsed) {
+	parsed, jsonErr := decodeProductJSON(payload)
+	if jsonErr == nil {
 		return parsed, nil
 	}
-	var items []genericScrapeOutput
-	if err := json.Unmarshal(payload, &items); err != nil {
-		return genericScrapeOutput{}, err
+	if parsed, htmlErr := decodeProductHTML(payload); htmlErr == nil {
+		return parsed, nil
 	}
-	if len(items) == 0 {
+	return genericScrapeOutput{}, jsonErr
+}
+
+func decodeProductJSON(payload []byte) (genericScrapeOutput, error) {
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(payload)))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return genericScrapeOutput{}, errors.New("scrape result is JSON but does not contain product fields")
+	}
+	if parsed, ok := productOutputFromValue(value); ok {
+		return parsed, nil
+	}
+	if items, ok := value.([]any); ok && len(items) == 0 {
 		return genericScrapeOutput{}, errors.New("scrape result is empty")
 	}
-	return items[0], nil
+	return genericScrapeOutput{}, errors.New("scrape result is JSON but does not contain product fields")
+}
+
+var jsonLDScriptPattern = regexp.MustCompile(`(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
+
+func decodeProductHTML(payload []byte) (genericScrapeOutput, error) {
+	for _, match := range jsonLDScriptPattern.FindAllSubmatch(payload, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		script := strings.TrimSpace(html.UnescapeString(string(match[1])))
+		if script == "" {
+			continue
+		}
+		if parsed, err := decodeProductJSON([]byte(script)); err == nil {
+			return parsed, nil
+		}
+	}
+	return genericScrapeOutput{}, errors.New("scrape result HTML does not contain product JSON-LD")
 }
 
 func brightDataPayloadError(payload []byte) error {
@@ -481,6 +578,9 @@ func brightDataPayloadError(payload []byte) error {
 	if envelope.StatusCode == 0 && message == "" {
 		return nil
 	}
+	if envelope.StatusCode >= 200 && envelope.StatusCode < 300 {
+		return nil
+	}
 	if message == "" {
 		message = "request failed"
 	}
@@ -490,9 +590,51 @@ func brightDataPayloadError(payload []byte) error {
 	return fmt.Errorf("Bright Data scrape failed: %s", message)
 }
 
+func unlockerBodyPayload(payload []byte) ([]byte, bool) {
+	var envelope struct {
+		StatusCode int `json:"status_code"`
+		Body       any `json:"body"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.StatusCode < 200 || envelope.StatusCode >= 300 || envelope.Body == nil {
+		return nil, false
+	}
+	switch body := envelope.Body.(type) {
+	case string:
+		trimmed := strings.TrimSpace(body)
+		if trimmed == "" {
+			return nil, false
+		}
+		return []byte(trimmed), true
+	default:
+		out, err := json.Marshal(body)
+		return out, err == nil
+	}
+}
+
 func hasProductFields(value genericScrapeOutput) bool {
-	return coalesce(value.Name, value.Title, value.ProductName, stringValue(value.Currency), stringValue(value.CurrencyCode), availabilityValue(value.Availability), availabilityValue(value.StockStatus)) != "" ||
-		numberValue(value.Price) > 0 || numberValue(value.CurrentPrice) > 0 || numberValue(value.FinalPrice) > 0
+	return coalesce(
+		firstStringValue(value.Name),
+		firstStringValue(value.Title),
+		firstStringValue(value.ProductName),
+		firstStringValue(value.Currency),
+		firstStringValue(value.CurrencyCode),
+		firstStringValue(value.PriceCurrency),
+		firstStringValue(offerField(value.Offers, "priceCurrency", "price_currency", "currency", "currency_code")),
+		availabilityValue(value.Availability),
+		availabilityValue(value.StockStatus),
+		availabilityValue(offerField(value.Offers, "availability", "stock_status")),
+	) != "" || numberValue(value.Price) > 0 || numberValue(value.CurrentPrice) > 0 || numberValue(value.FinalPrice) > 0 || numberValue(offerField(value.Offers, "price", "current_price", "final_price", "amount")) > 0
+}
+
+func scraperDescription() string {
+	return "Extract product title, current price, currency, image URL, canonical URL, and availability from this product detail page. Return structured JSON with fields name, price or current_price, currency, image_url, url, and availability."
+}
+
+func truncateString(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
 }
 
 func collectionIDFromBody(out []byte) string {
@@ -514,6 +656,19 @@ func snapshotIDFromBody(out []byte) string {
 	return coalesce(envelope.SnapshotID, envelope.ID)
 }
 
+func collectorIDFromTemplateBody(out []byte) string {
+	var envelope struct {
+		ID          string `json:"id"`
+		CollectorID string `json:"collector_id"`
+		Data        struct {
+			ID          string `json:"id"`
+			CollectorID string `json:"collector_id"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(bytes.TrimSpace(out), &envelope)
+	return coalesce(envelope.ID, envelope.CollectorID, envelope.Data.ID, envelope.Data.CollectorID)
+}
+
 func statusFromBody(out []byte) string {
 	var envelope struct {
 		Status string `json:"status"`
@@ -521,6 +676,40 @@ func statusFromBody(out []byte) string {
 	}
 	_ = json.Unmarshal(bytes.TrimSpace(out), &envelope)
 	return strings.ToLower(coalesce(envelope.Status, envelope.State))
+}
+
+func stepFromBody(out []byte) string {
+	var envelope struct {
+		Step string `json:"step"`
+	}
+	_ = json.Unmarshal(bytes.TrimSpace(out), &envelope)
+	return strings.ToLower(envelope.Step)
+}
+
+func isDoneStatus(status string) bool {
+	switch status {
+	case "done", "ready", "completed", "success", "finished":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFailedStatus(status string) bool {
+	switch status {
+	case "failed", "error", "canceled", "cancelled", "rejected":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAwaitingApproval(status, step string) bool {
+	switch status {
+	case "awaiting_approval", "pending_answer", "user_approval":
+		return true
+	}
+	return step == "user_approval"
 }
 
 func numberValue(value any) float64 {
@@ -547,21 +736,30 @@ func numberValue(value any) float64 {
 		}
 		return 0
 	case string:
-		cleaned := strings.Map(func(r rune) rune {
-			switch {
-			case r >= '0' && r <= '9':
-				return r
-			case r == '.':
-				return r
-			default:
-				return -1
-			}
-		}, typed)
-		out, _ := strconv.ParseFloat(cleaned, 64)
-		return out
+		return priceFromString(typed)
 	default:
 		return 0
 	}
+}
+
+var (
+	currencyPricePattern = regexp.MustCompile(`(?i)(?:inr|rs\.?|\p{Sc})\s*([0-9][0-9,\s]*(?:\.[0-9]+)?)`)
+	plainPricePattern    = regexp.MustCompile(`(?:^|[^A-Za-z0-9])([0-9]{1,3}(?:[,\s][0-9]{3})+|[0-9]{1,3}(?:,[0-9]{2})+(?:,[0-9]{3})?|[0-9]+(?:\.[0-9]+)?)(?:[^A-Za-z0-9]|$)`)
+)
+
+func priceFromString(value string) float64 {
+	for _, pattern := range []*regexp.Regexp{currencyPricePattern, plainPricePattern} {
+		match := pattern.FindStringSubmatch(value)
+		if len(match) < 2 {
+			continue
+		}
+		cleaned := strings.NewReplacer(",", "", " ", "").Replace(strings.TrimSpace(match[1]))
+		out, _ := strconv.ParseFloat(cleaned, 64)
+		if out > 0 {
+			return out
+		}
+	}
+	return 0
 }
 
 func currencyFromPrice(value any) string {
@@ -582,9 +780,9 @@ func availabilityValue(value any) string {
 		}
 		return domain.AvailabilityOutOfStock
 	case string:
-		return strings.TrimSpace(typed)
+		return normalizeAvailability(typed)
 	default:
-		return stringValue(typed)
+		return normalizeAvailability(firstStringValue(typed))
 	}
 }
 
@@ -601,6 +799,94 @@ func stringValue(value any) string {
 	default:
 		return ""
 	}
+}
+
+func firstStringValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case []any:
+		for _, item := range typed {
+			if out := firstStringValue(item); out != "" {
+				return out
+			}
+		}
+		return ""
+	case map[string]any:
+		for _, key := range []string{"url", "href", "src", "value", "text", "name"} {
+			if out := firstStringValue(typed[key]); out != "" {
+				return out
+			}
+		}
+		return ""
+	default:
+		return stringValue(typed)
+	}
+}
+
+func normalizeAvailability(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	lowered := strings.ToLower(trimmed)
+	if idx := strings.LastIndexAny(lowered, "/#"); idx >= 0 && idx < len(lowered)-1 {
+		lowered = lowered[idx+1:]
+	}
+	compact := strings.NewReplacer(" ", "", "_", "", "-", "").Replace(lowered)
+	switch {
+	case strings.Contains(compact, "instock") || strings.Contains(compact, "available"):
+		return domain.AvailabilityInStock
+	case strings.Contains(compact, "outofstock") || strings.Contains(compact, "soldout") || strings.Contains(compact, "unavailable"):
+		return domain.AvailabilityOutOfStock
+	case strings.Contains(compact, "preorder") || strings.Contains(compact, "presale"):
+		return domain.AvailabilityPreorder
+	default:
+		return trimmed
+	}
+}
+
+func offerField(offers any, keys ...string) any {
+	switch typed := offers.(type) {
+	case []any:
+		for _, item := range typed {
+			if out := offerField(item, keys...); out != nil {
+				return out
+			}
+		}
+	case map[string]any:
+		for _, key := range keys {
+			if value, ok := typed[key]; ok {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func productOutputFromValue(value any) (genericScrapeOutput, bool) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if parsed, ok := productOutputFromValue(item); ok {
+				return parsed, true
+			}
+		}
+	case map[string]any:
+		out, err := json.Marshal(typed)
+		if err == nil {
+			var parsed genericScrapeOutput
+			if err := json.Unmarshal(out, &parsed); err == nil && hasProductFields(parsed) {
+				return parsed, true
+			}
+		}
+		for _, key := range []string{"product", "data", "item", "@graph", "graph", "items", "products", "results"} {
+			if parsed, ok := productOutputFromValue(typed[key]); ok {
+				return parsed, true
+			}
+		}
+	}
+	return genericScrapeOutput{}, false
 }
 
 func firstJSONValue(out []byte) ([]byte, error) {
@@ -643,6 +929,36 @@ func lookupDomainMap(values map[string]string, domainName string) (string, bool)
 			break
 		}
 		domainName = rest
+	}
+	return "", false
+}
+
+func defaultDatasetID(domainName string) (string, bool) {
+	domainName = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domainName)), "www.")
+	if domainName == "" {
+		return "", false
+	}
+	for _, suffix := range []string{
+		"amazon.ae",
+		"amazon.ca",
+		"amazon.co.jp",
+		"amazon.co.uk",
+		"amazon.com",
+		"amazon.com.au",
+		"amazon.com.br",
+		"amazon.com.mx",
+		"amazon.de",
+		"amazon.es",
+		"amazon.fr",
+		"amazon.in",
+		"amazon.it",
+		"amazon.nl",
+		"amazon.sa",
+		"amazon.sg",
+	} {
+		if domainName == suffix || strings.HasSuffix(domainName, "."+suffix) {
+			return "gd_l7q7dkf244hwjntr0", true
+		}
 	}
 	return "", false
 }

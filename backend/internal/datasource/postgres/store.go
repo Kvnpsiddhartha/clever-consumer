@@ -241,6 +241,17 @@ func (s *Store) Tracker(ctx context.Context, userID, trackerID string) (domain.T
 	return trackers[0], nil
 }
 
+func (s *Store) DeleteTracker(ctx context.Context, userID, trackerID string) error {
+	tag, err := s.pool.Exec(ctx, `delete from trackers where user_id = $1 and id = $2`, userID, trackerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("tracker not found")
+	}
+	return nil
+}
+
 func (s *Store) AddObservation(ctx context.Context, obs domain.Observation) error {
 	_, err := s.pool.Exec(ctx, `
 		insert into observations (id, tracker_id, price, currency, availability, method, confidence, observed_at)

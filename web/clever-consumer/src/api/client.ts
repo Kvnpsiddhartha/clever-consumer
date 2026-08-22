@@ -32,6 +32,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  googleLoginUrl() {
+    return `${API_BASE}/v1/auth/google/start`
+  },
   requestMagicLink(email: string) {
     return request<MagicLinkResponse>('/v1/auth/magic-links', {
       method: 'POST',
@@ -67,6 +70,12 @@ export const api = {
   },
   listTrackers() {
     return request<ItemList<Tracker>>('/v1/trackers')
+  },
+  getTracker(id: string) {
+    return request<Tracker>(`/v1/trackers/${id}`)
+  },
+  deleteTracker(id: string) {
+    return request<void>(`/v1/trackers/${id}`, { method: 'DELETE' })
   },
   pauseTracker(id: string) {
     return request<void>(`/v1/trackers/${id}/pause`, { method: 'POST' })

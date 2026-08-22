@@ -44,8 +44,7 @@ func main() {
 	}
 	defer store.Close()
 
-	brightData := scraping.NewBrightDataCLI(
-		cfg.BrightDataBinary,
+	brightData := scraping.NewBrightDataAPI(
 		cfg.BrightDataAPIKey,
 		cfg.BrightDataZone,
 		cfg.BrightDataAPIBaseURL,
