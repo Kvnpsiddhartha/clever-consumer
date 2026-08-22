@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: clever_consumer
+      POSTGRES_USER: clever
+      POSTGRES_PASSWORD: clever
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+
+  mailpit:
+    image: axllent/mailpit:v1.25
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  pgdata:

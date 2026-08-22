@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: Clever Consumer API
+  version: 0.1.0
+servers:
+  - url: http://localhost:18080
+paths:
+  /healthz:
+    get:
+      responses:
+        "200":
+          description: Service health
+  /readyz:
+    get:
+      responses:
+        "200":
+          description: Service readiness
+  /v1/auth/magic-links:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "202":
+          description: Magic link accepted
+  /v1/auth/verify:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: Session established
+  /v1/me:
+    get:
+      responses:
+        "200":
+          description: Current user
+    patch:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [country, timezone]
+              properties:
+                country:
+                  type: string
+                  minLength: 2
+                  maxLength: 2
+                timezone:
+                  type: string
+      responses:
+        "200":
+          description: Updated profile
+  /v1/product-previews:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                country:
+                  type: string
+      responses:
+        "202":
+          description: Product extraction preview
+  /v1/product-previews/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Product extraction preview
+  /v1/trackers:
+    get:
+      responses:
+        "200":
+          description: Tracker list
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preview_id, interval_hours, rules]
+              properties:
+                preview_id:
+                  type: string
+                interval_hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 168
+                country:
+                  type: string
+                rules:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/AlertRule"
+      responses:
+        "201":
+          description: Tracker created
+  /v1/trackers/{id}/pause:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "204":
+          description: Tracker paused
+  /v1/trackers/{id}/resume:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "204":
+          description: Tracker resumed
+  /v1/trackers/{id}/run:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "202":
+          description: Manual scrape run created
+  /v1/trackers/{id}/observations:
+    get:
+      parameters:
+        - $ref: "#/components/parameters/TrackerID"
+      responses:
+        "200":
+          description: Tracker observations
+components:
+  parameters:
+    TrackerID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    AlertRule:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [target_price, price_drop, back_in_stock, out_of_stock]
+        threshold_price:
+          type: number
+        enabled:
+          type: boolean
+    Error:
+      type: object
+      required: [code, message, correlation_id]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        correlation_id:
+          type: string

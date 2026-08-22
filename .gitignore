@@ -1,0 +1,9 @@
+.gocache/
+.gomodcache/
+
+node_modules/
+dist/
+.pnpm-store/
+
+.env
+.DS_Store
