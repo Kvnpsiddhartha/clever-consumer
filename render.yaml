@@ -1,0 +1,65 @@
+# Render Blueprint for the clever-consumer app (backend API+worker + frontend static site).
+# Deploy: Render dashboard -> New -> Blueprint -> point at this repo.
+# Postgres is intentionally NOT declared here -- use a Neon free-tier database instead
+# (Render's free Postgres expires 30 days after creation). Create it separately and
+# paste the connection string into DATABASE_URL below after the blueprint is applied.
+#
+# See README.md "Deployment" section for the full env var reference and setup steps.
+
+services:
+  - type: web
+    name: clever-consumer-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ROLE
+        value: all
+      - key: HTTP_ADDR
+        value: ":18080"
+      - key: SESSION_COOKIE_NAME
+        value: cc_session
+      - key: DATABASE_URL
+        sync: false # set manually to your Neon connection string (sslmode=require)
+      - key: PUBLIC_BASE_URL
+        sync: false # set manually once the frontend static site URL is known
+      - key: GOOGLE_REDIRECT_URL
+        sync: false # optional; only needed if Google OAuth is enabled
+      - key: GOOGLE_CLIENT_ID
+        sync: false # optional
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false # optional
+      - key: BRIGHTDATA_API_BASE_URL
+        value: https://api.brightdata.com
+      - key: BRIGHTDATA_API_KEY
+        sync: false
+      - key: BRIGHTDATA_UNLOCKER_ZONE
+        sync: false
+      - key: BRIGHTDATA_TIMEOUT_SECONDS
+        value: "1800"
+      - key: BRIGHTDATA_HEAL_RETRIES
+        value: "1"
+      - key: SCRAPER_COLLECTOR_REQUEST_THRESHOLD
+        value: "500"
+      - key: SCRAPER_COLLECTOR_PRODUCT_THRESHOLD
+        value: "100"
+      - key: SCRAPER_COLLECTOR_MAX_PER_DOMAIN
+        value: "3"
+      - key: SMTP_FROM
+        value: alerts@clever-consumer.local
+
+  - type: web
+    name: clever-consumer-frontend
+    runtime: static
+    rootDir: web/clever-consumer
+    buildCommand: pnpm install && pnpm build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false # set manually to the backend service's onrender.com URL, then redeploy
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

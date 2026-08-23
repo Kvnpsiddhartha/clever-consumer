@@ -371,14 +371,24 @@ func (a *API) exchangeGoogleCode(r *http.Request, code string) (string, error) {
 }
 
 func (a *API) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) {
+	// The frontend and backend are typically deployed on different hosts (e.g. separate
+	// Render services), making every credentialed fetch cross-site. SameSite=Lax cookies
+	// are not attached to cross-site fetch/XHR requests, so over HTTPS we use None instead
+	// (which browsers only accept when Secure is also set). Local http://localhost dev
+	// keeps Lax since None requires Secure.
+	sameSite := http.SameSiteLaxMode
+	secure := strings.HasPrefix(a.cfg.PublicBaseURL, "https://")
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     a.cfg.SessionCookieName,
 		Value:    sessionID,
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   strings.HasPrefix(a.cfg.PublicBaseURL, "https://"),
+		SameSite: sameSite,
+		Secure:   secure,
 	})
 }
 

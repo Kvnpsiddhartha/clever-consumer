@@ -12,6 +12,8 @@ The project is organized around three local surfaces:
 
 Local Docker services also include Postgres on `localhost:55432` and Mailpit at `http://localhost:8025` for inspecting email.
 
+A fourth, fully independent piece lives in `demo-store/`: a fake e-commerce site used to demo the scraper live — its product pages rotate DOM/selector/layout structure every few loads while keeping the underlying product data valid, to show the scraper isn't brittle to layout changes. See `demo-store/README.md`.
+
 ## What Is Implemented
 
 - Go backend under `backend/` with the requested `cmd/main/main.go`, HTTP controllers, service layer, Postgres datasource, scheduler worker, Bright Data API provider, and email boundary.
@@ -168,10 +170,54 @@ export SCRAPER_COLLECTOR_MAX_PER_DOMAIN=3
 
 When running through Docker Compose, these variables can be exported in your shell before `make up` or placed in a local `.env` file.
 
+## Deployment
+
+Everything deploys free on **Render**, split into two Render Projects, plus **Neon** for Postgres (Neon's free tier has no time-based expiry, unlike Render's own free Postgres which is deleted 30 days after creation):
+
+| Piece | Where | Type |
+|---|---|---|
+| Go backend (`APP_ROLE=all`) | Render, Project `clever-consumer` | Web Service, Docker (`backend/Dockerfile`) |
+| React web app (`web/clever-consumer`) | Render, Project `clever-consumer` | Static Site (`pnpm build`, publish `dist`) |
+| `demo-store/` | Render, Project `demo-store` (kept separate so redeploys never touch the real app) | Web Service, Node (`pnpm build` / `pnpm start`) |
+| Postgres | Neon | shared by both the main app and `demo-store`'s own `demo_store` schema |
+
+Blueprints are checked in: `render.yaml` (backend + frontend) and `demo-store/render.yaml` (demo store) — in the Render dashboard use **New → Blueprint** and point at this repo for each.
+
+Setup, once:
+
+```sh
+# 1. Create a Neon project, then apply schema to it:
+psql "$NEON_DATABASE_URL" -f backend/migrations/000001_initial.sql
+psql "$NEON_DATABASE_URL" -f backend/migrations/000002_domain_scraper_collector_pool.sql
+psql "$NEON_DATABASE_URL" -f demo-store/db/schema.sql
+
+# 2. Deploy clever-consumer/render.yaml as the "clever-consumer" Render Project.
+#    Set on the backend service: DATABASE_URL (Neon), PUBLIC_BASE_URL (frontend's
+#    Render URL, once known), BRIGHTDATA_* (from your local .env), and optionally
+#    GOOGLE_CLIENT_ID/SECRET + GOOGLE_REDIRECT_URL (must match a redirect URI
+#    registered in Google Cloud Console).
+#    Set on the frontend static site: VITE_API_BASE_URL (backend's Render URL) --
+#    this is read at BUILD time (Vite inlines it), so set it before the first deploy.
+
+# 3. Deploy demo-store/render.yaml as its own "demo-store" Render Project.
+#    Set DATABASE_URL to the same Neon connection string.
+```
+
+Because the backend and frontend end up on different `*.onrender.com` hosts, every
+session-authenticated API call from the web app is cross-site. The session cookie
+(`cc_session`, set in `backend/internal/http/controllers/api.go`) already accounts for
+this: it uses `SameSite=None; Secure` whenever `PUBLIC_BASE_URL` is `https://`, and falls
+back to `SameSite=Lax` for local `http://localhost` dev.
+
+Render's free Web Services (backend + demo-store) spin down after 15 minutes idle with a
+~1 minute cold start on the next request — hit both URLs once a few minutes before a live
+demo. The frontend Static Site never sleeps.
+
 ## Verification
 
 ```sh
 make test
 cd web/clever-consumer && pnpm run typecheck && pnpm run build
 cd extension/chrome && pnpm run typecheck && pnpm run build
+cd demo-store && pnpm run typecheck && pnpm run build
 ```
