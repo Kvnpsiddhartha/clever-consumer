@@ -37,10 +37,16 @@ type Store interface {
 	SetTrackerStatus(ctx context.Context, userID, trackerID, status string) error
 	TouchTrackerRun(ctx context.Context, userID, trackerID string, price float64, availability string, observedAt, nextCheckAt time.Time) error
 	DueTrackers(ctx context.Context, now time.Time, limit int) ([]domain.Tracker, error)
+	ListCollectorOperations(ctx context.Context) ([]domain.CollectorOperationsProfile, error)
+	CollectorHealingTarget(ctx context.Context, collectorID string) (domain.CollectorHealingTarget, error)
 }
 
 type Scraper interface {
 	Scrape(ctx context.Context, targetURL, country string) (domain.ScrapeResult, error)
+}
+
+type CollectorHealer interface {
+	HealCollector(ctx context.Context, collector domain.ScraperCollector, targetURL, country, reason string) error
 }
 
 type Application struct {
@@ -49,6 +55,8 @@ type Application struct {
 	logger  *zap.SugaredLogger
 	cfg     config.Config
 }
+
+const trackerRunTimeout = 2 * time.Minute
 
 func NewApplication(store Store, scraper Scraper, logger *zap.SugaredLogger, cfg config.Config) *Application {
 	return &Application{store: store, scraper: scraper, logger: logger, cfg: cfg}
@@ -240,8 +248,13 @@ func (a *Application) RunTrackerNow(ctx context.Context, userID, trackerID strin
 	if err != nil {
 		return domain.Observation{}, err
 	}
-	result, err := a.scraper.Scrape(ctx, tracker.ProductURL, tracker.Country)
+	scrapeCtx, cancel := context.WithTimeout(ctx, trackerRunTimeout)
+	defer cancel()
+	result, err := a.scraper.Scrape(scrapeCtx, tracker.ProductURL, tracker.Country)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return domain.Observation{}, fmt.Errorf("scraper run timed out after %s", trackerRunTimeout)
+		}
 		return domain.Observation{}, err
 	}
 	now := time.Now().UTC()
@@ -275,6 +288,32 @@ func (a *Application) ProcessDueTrackers(ctx context.Context) error {
 			a.logger.Warnw("scheduled tracker run failed", "tracker_id", tracker.ID, "error", err)
 		}
 	}
+	return nil
+}
+
+func (a *Application) ListCollectorOperations(ctx context.Context) ([]domain.CollectorOperationsProfile, error) {
+	return a.store.ListCollectorOperations(ctx)
+}
+
+func (a *Application) HealCollector(ctx context.Context, collectorID, reason string) error {
+	target, err := a.store.CollectorHealingTarget(ctx, strings.TrimSpace(collectorID))
+	if err != nil {
+		return err
+	}
+	if target.TargetURL == "" {
+		return errors.New("collector has no observed product URL to use for healing")
+	}
+	healer, ok := a.scraper.(CollectorHealer)
+	if !ok {
+		return errors.New("scraper does not support collector healing")
+	}
+	go func() {
+		healCtx, cancel := context.WithTimeout(context.Background(), a.cfg.BrightDataTimeout)
+		defer cancel()
+		if err := healer.HealCollector(healCtx, target.Collector, target.TargetURL, target.Country, reason); err != nil {
+			a.logger.Warnw("manual collector healing failed", "collector_id", target.Collector.ID, "external_collector_id", target.Collector.ExternalCollectorID, "domain", target.Profile.Domain, "error", err)
+		}
+	}()
 	return nil
 }
 

@@ -32,6 +32,10 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := recoverInterruptedCollectorOperations(ctx, pool, time.Now().UTC()); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return &Store{pool: pool}, nil
 }
 
@@ -73,6 +77,42 @@ func migrationsDir() (string, error) {
 		}
 	}
 	return "", errors.New("migrations directory not found")
+}
+
+func recoverInterruptedCollectorOperations(ctx context.Context, pool *pgxpool.Pool, now time.Time) error {
+	if _, err := pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set last_error = case last_error
+			when 'context canceled' then 'collector run was interrupted by backend restart'
+			when 'context deadline exceeded' then 'collector run timed out before Bright Data returned a dataset'
+			else last_error
+		end,
+		updated_at = case
+			when last_error in ('context canceled', 'context deadline exceeded') then $1
+			else updated_at
+		end
+		where last_error in ('context canceled', 'context deadline exceeded')
+	`, now); err != nil {
+		return err
+	}
+	if _, err := pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set status = $2,
+		    last_error = coalesce(last_error, 'collector healing was interrupted by backend restart'),
+		    updated_at = $3
+		where status = $1 and external_collector_id is not null
+	`, domain.ScraperCollectorHealing, domain.ScraperCollectorActive, now); err != nil {
+		return err
+	}
+	_, err := pool.Exec(ctx, `
+		update domain_scraper_collectors
+		set status = $2,
+		    failure_count = failure_count + 1,
+		    last_error = 'collector provisioning was interrupted by backend restart',
+		    updated_at = $3
+		where status = $1 and external_collector_id is null
+	`, domain.ScraperCollectorProvisioning, domain.ScraperCollectorFailed, now)
+	return err
 }
 
 func (s *Store) CreateMagicLink(ctx context.Context, id, email, tokenHash string, expiresAt time.Time) error {
@@ -409,6 +449,124 @@ func (s *Store) PrepareScrapeTarget(ctx context.Context, domainName, targetURL, 
 	return target, nil
 }
 
+func (s *Store) ListCollectorOperations(ctx context.Context) ([]domain.CollectorOperationsProfile, error) {
+	rows, err := s.pool.Query(ctx, `
+		select p.id, p.domain, p.status, p.request_count, p.product_count, coalesce(latest.url, ''), p.updated_at
+		from domain_scraper_profiles p
+		left join lateral (
+			select url
+			from domain_scraper_products
+			where profile_id = p.id
+			order by last_seen_at desc
+			limit 1
+		) latest on true
+		order by p.request_count desc, p.updated_at desc, p.domain asc
+	`)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.CollectorOperationsProfile, error) {
+		var profile domain.CollectorOperationsProfile
+		err := row.Scan(&profile.ID, &profile.Domain, &profile.Status, &profile.RequestCount, &profile.ProductCount, &profile.LatestProductURL, &profile.UpdatedAt)
+		return profile, err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range profiles {
+		collectors, err := s.collectorsForProfile(ctx, profiles[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		profiles[i].Collectors = collectors
+	}
+	return profiles, nil
+}
+
+func (s *Store) CollectorHealingTarget(ctx context.Context, collectorID string) (domain.CollectorHealingTarget, error) {
+	var target domain.CollectorHealingTarget
+	var activeSince sql.NullTime
+	err := s.pool.QueryRow(ctx, `
+		select
+			p.id, p.domain, p.status, p.request_count, p.product_count, p.updated_at,
+			c.id, c.profile_id, c.provider, coalesce(c.external_collector_id, ''), c.status, c.purpose, coalesce(c.url_pattern, ''),
+			c.request_count, c.success_count, c.failure_count, c.consecutive_structural_failures, coalesce(c.last_error, ''),
+			c.active_since, c.created_at, c.updated_at,
+			coalesce(latest.url, ''),
+			coalesce(
+				(select t.country from trackers t where t.product_url = latest.url order by t.updated_at desc limit 1),
+				(select pp.country from product_previews pp where pp.url = latest.url order by pp.updated_at desc limit 1),
+				'IN'
+			)
+		from domain_scraper_collectors c
+		join domain_scraper_profiles p on p.id = c.profile_id
+		left join lateral (
+			select url
+			from domain_scraper_products
+			where profile_id = p.id
+			order by last_seen_at desc
+			limit 1
+		) latest on true
+		where c.id = $1
+	`, collectorID).Scan(
+		&target.Profile.ID,
+		&target.Profile.Domain,
+		&target.Profile.Status,
+		&target.Profile.RequestCount,
+		&target.Profile.ProductCount,
+		&target.Profile.UpdatedAt,
+		&target.Collector.ID,
+		&target.Collector.ProfileID,
+		&target.Collector.Provider,
+		&target.Collector.ExternalCollectorID,
+		&target.Collector.Status,
+		&target.Collector.Purpose,
+		&target.Collector.URLPattern,
+		&target.Collector.RequestCount,
+		&target.Collector.SuccessCount,
+		&target.Collector.FailureCount,
+		&target.Collector.ConsecutiveStructuralFailures,
+		&target.Collector.LastError,
+		&activeSince,
+		&target.Collector.CreatedAt,
+		&target.Collector.UpdatedAt,
+		&target.TargetURL,
+		&target.Country,
+	)
+	if err != nil {
+		return domain.CollectorHealingTarget{}, err
+	}
+	if activeSince.Valid {
+		target.Collector.ActiveSince = &activeSince.Time
+	}
+	return target, nil
+}
+
+func (s *Store) collectorsForProfile(ctx context.Context, profileID string) ([]domain.ScraperCollector, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
+		       request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
+		       active_since, created_at, updated_at
+		from domain_scraper_collectors
+		where profile_id = $1
+		order by
+			case status
+				when $2 then 1
+				when $3 then 2
+				when $4 then 3
+				else 4
+			end,
+			updated_at desc
+	`, profileID, domain.ScraperCollectorHealing, domain.ScraperCollectorActive, domain.ScraperCollectorProvisioning)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.ScraperCollector, error) {
+		return scanScraperCollector(row)
+	})
+}
+
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -419,10 +577,18 @@ func selectActiveCollector(ctx context.Context, q queryer, profileID, provider s
 		       request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
 		       active_since, created_at, updated_at
 		from domain_scraper_collectors
-		where profile_id = $1 and provider = $2 and status = $3 and external_collector_id is not null
-		order by consecutive_structural_failures asc, request_count asc, updated_at asc
+		where profile_id = $1 and provider = $2 and status in ($3, $4, $5) and external_collector_id is not null
+		order by
+			case status
+				when $3 then 1
+				when $4 then 2
+				else 3
+			end,
+			consecutive_structural_failures asc,
+			request_count asc,
+			updated_at asc
 		limit 1
-	`, profileID, provider, domain.ScraperCollectorActive)
+	`, profileID, provider, domain.ScraperCollectorActive, domain.ScraperCollectorHealing, domain.ScraperCollectorFailed)
 	collector, err := scanScraperCollector(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -563,8 +729,8 @@ func (s *Store) StartCollectorHealing(ctx context.Context, collectorID string, n
 	tag, err := s.pool.Exec(ctx, `
 		update domain_scraper_collectors
 		set status = $2, updated_at = $3
-		where id = $1 and status = $4 and external_collector_id is not null
-	`, collectorID, domain.ScraperCollectorHealing, now, domain.ScraperCollectorActive)
+		where id = $1 and status in ($4, $5) and external_collector_id is not null
+	`, collectorID, domain.ScraperCollectorHealing, now, domain.ScraperCollectorActive, domain.ScraperCollectorFailed)
 	if err != nil {
 		return false, err
 	}

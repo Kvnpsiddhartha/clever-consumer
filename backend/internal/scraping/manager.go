@@ -80,7 +80,13 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	}
 
 	structural := IsDataQualityError(err)
-	_ = m.store.RecordCollectorFailure(ctx, target.Collector.ID, err.Error(), structural, time.Now().UTC())
+	failureMessage := err.Error()
+	if errors.Is(err, context.DeadlineExceeded) {
+		failureMessage = "collector run timed out before Bright Data returned a dataset"
+	}
+	storeCtx, cancel := collectorStoreContext()
+	_ = m.store.RecordCollectorFailure(storeCtx, target.Collector.ID, failureMessage, structural, time.Now().UTC())
+	cancel()
 	if !structural {
 		return domain.ScrapeResult{}, err
 	}
@@ -110,6 +116,34 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	}
 	_ = m.store.RecordCollectorSuccess(ctx, target.Collector.ID, time.Now().UTC())
 	return result, nil
+}
+
+func (m *Manager) HealCollector(ctx context.Context, collector domain.ScraperCollector, targetURL, country, reason string) error {
+	if collector.ExternalCollectorID == "" {
+		return errors.New("collector does not have a Bright Data collector id")
+	}
+	healingStarted, err := m.store.StartCollectorHealing(ctx, collector.ID, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if !healingStarted {
+		return errors.New("collector is already healing or cannot be healed")
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "manual collector heal requested from the collector operations page"
+	}
+	scrapeErr := DataQualityError{Err: errors.New(reason)}
+	if err := m.provider.HealCollector(ctx, collector.ExternalCollectorID, targetURL, country, scrapeErr); err != nil {
+		storeCtx, cancel := collectorStoreContext()
+		defer cancel()
+		_ = m.store.FinishCollectorHealing(storeCtx, collector.ID, err.Error(), false, time.Now().UTC())
+		return err
+	}
+	storeCtx, cancel := collectorStoreContext()
+	defer cancel()
+	return m.store.FinishCollectorHealing(storeCtx, collector.ID, "", true, time.Now().UTC())
 }
 
 func (m *Manager) healCollectorInBackground(collector domain.ScraperCollector, targetURL, country, domainName string, scrapeErr error) {

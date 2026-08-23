@@ -234,14 +234,14 @@ func TestBrightDataHealsCollectorThroughAPIAndAutoApproves(t *testing.T) {
 			_, _ = w.Write([]byte(`{"status":"done"}`))
 		case "/dca/collectors/c_adidas/resume_automation_job":
 			var body struct {
-				Approve  bool `json:"approve"`
+				Message  bool `json:"message"`
 				AutoSave bool `json:"auto_save"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if !body.Approve || !body.AutoSave {
-				t.Fatalf("expected approve and auto_save body, got %+v", body)
+			if !body.Message || !body.AutoSave {
+				t.Fatalf("expected message and auto_save body, got %+v", body)
 			}
 			_, _ = w.Write([]byte(`{"status":"running"}`))
 		default:

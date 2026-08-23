@@ -125,21 +125,39 @@ type ScraperProfile struct {
 }
 
 type ScraperCollector struct {
-	ID                            string
-	ProfileID                     string
-	Provider                      string
-	ExternalCollectorID           string
-	Status                        string
-	Purpose                       string
-	URLPattern                    string
-	RequestCount                  int
-	SuccessCount                  int
-	FailureCount                  int
-	ConsecutiveStructuralFailures int
-	LastError                     string
-	ActiveSince                   *time.Time
-	CreatedAt                     time.Time
-	UpdatedAt                     time.Time
+	ID                            string     `json:"id"`
+	ProfileID                     string     `json:"profile_id"`
+	Provider                      string     `json:"provider"`
+	ExternalCollectorID           string     `json:"external_collector_id"`
+	Status                        string     `json:"status"`
+	Purpose                       string     `json:"purpose"`
+	URLPattern                    string     `json:"url_pattern"`
+	RequestCount                  int        `json:"request_count"`
+	SuccessCount                  int        `json:"success_count"`
+	FailureCount                  int        `json:"failure_count"`
+	ConsecutiveStructuralFailures int        `json:"consecutive_structural_failures"`
+	LastError                     string     `json:"last_error,omitempty"`
+	ActiveSince                   *time.Time `json:"active_since,omitempty"`
+	CreatedAt                     time.Time  `json:"created_at"`
+	UpdatedAt                     time.Time  `json:"updated_at"`
+}
+
+type CollectorOperationsProfile struct {
+	ID               string             `json:"id"`
+	Domain           string             `json:"domain"`
+	Status           string             `json:"status"`
+	RequestCount     int                `json:"request_count"`
+	ProductCount     int                `json:"product_count"`
+	LatestProductURL string             `json:"latest_product_url,omitempty"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	Collectors       []ScraperCollector `json:"collectors"`
+}
+
+type CollectorHealingTarget struct {
+	Profile   ScraperProfile
+	Collector ScraperCollector
+	TargetURL string
+	Country   string
 }
 
 type CollectorThresholds struct {

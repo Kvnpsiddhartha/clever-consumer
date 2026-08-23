@@ -54,3 +54,32 @@ export type Observation = {
   confidence: number
   observed_at: string
 }
+
+export type ScraperCollector = {
+  id: string
+  profile_id: string
+  provider: string
+  external_collector_id: string
+  status: 'active' | 'provisioning' | 'healing' | 'failed'
+  purpose: 'default' | 'load_shard' | string
+  url_pattern: string
+  request_count: number
+  success_count: number
+  failure_count: number
+  consecutive_structural_failures: number
+  last_error?: string
+  active_since?: string
+  created_at: string
+  updated_at: string
+}
+
+export type CollectorOperationsProfile = {
+  id: string
+  domain: string
+  status: string
+  request_count: number
+  product_count: number
+  latest_product_url?: string
+  updated_at: string
+  collectors: ScraperCollector[]
+}
