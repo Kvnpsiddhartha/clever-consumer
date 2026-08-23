@@ -577,18 +577,17 @@ func selectActiveCollector(ctx context.Context, q queryer, profileID, provider s
 		       request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
 		       active_since, created_at, updated_at
 		from domain_scraper_collectors
-		where profile_id = $1 and provider = $2 and status in ($3, $4, $5) and external_collector_id is not null
+		where profile_id = $1 and provider = $2 and status in ($3, $4) and external_collector_id is not null
 		order by
 			case status
 				when $3 then 1
 				when $4 then 2
-				else 3
 			end,
 			consecutive_structural_failures asc,
 			request_count asc,
 			updated_at asc
 		limit 1
-	`, profileID, provider, domain.ScraperCollectorActive, domain.ScraperCollectorHealing, domain.ScraperCollectorFailed)
+	`, profileID, provider, domain.ScraperCollectorActive, domain.ScraperCollectorHealing)
 	collector, err := scanScraperCollector(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -678,10 +677,11 @@ func (s *Store) ActivateDiscoveredCollector(ctx context.Context, profileID, prov
 		values ('dsc_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3, $4, $5, $6, $6, $6)
 		on conflict (provider, external_collector_id) where external_collector_id is not null
 		do update set profile_id = excluded.profile_id, status = excluded.status, purpose = excluded.purpose, active_since = coalesce(domain_scraper_collectors.active_since, excluded.active_since), last_error = null, updated_at = excluded.updated_at
+		where domain_scraper_collectors.status <> $7
 		returning id, profile_id, provider, coalesce(external_collector_id, ''), status, purpose, coalesce(url_pattern, ''),
 		          request_count, success_count, failure_count, consecutive_structural_failures, coalesce(last_error, ''),
 		          active_since, created_at, updated_at
-	`, profileID, provider, externalCollectorID, domain.ScraperCollectorActive, purpose, now)
+	`, profileID, provider, externalCollectorID, domain.ScraperCollectorActive, purpose, now, domain.ScraperCollectorFailed)
 	collector, err = scanScraperCollector(row)
 	if err != nil {
 		return domain.ScraperCollector{}, err
@@ -718,10 +718,11 @@ func (s *Store) RecordCollectorFailure(ctx context.Context, collectorID, message
 		set request_count = request_count + 1,
 		    failure_count = failure_count + 1,
 		    consecutive_structural_failures = case when $2 then consecutive_structural_failures + 1 else consecutive_structural_failures end,
+		    status = case when $2 then status else $5 end,
 		    last_error = $3,
 		    updated_at = $4
 		where id = $1
-	`, collectorID, structural, message, now)
+	`, collectorID, structural, message, now, domain.ScraperCollectorFailed)
 	return err
 }
 

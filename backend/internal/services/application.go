@@ -57,6 +57,7 @@ type Application struct {
 }
 
 const trackerRunTimeout = 2 * time.Minute
+const previewScrapeTimeout = 2 * time.Minute
 
 func NewApplication(store Store, scraper Scraper, logger *zap.SugaredLogger, cfg config.Config) *Application {
 	return &Application{store: store, scraper: scraper, logger: logger, cfg: cfg}
@@ -143,8 +144,13 @@ func (a *Application) CreatePreview(ctx context.Context, user domain.User, rawUR
 	if country == "" {
 		country = user.Country
 	}
-	result, err := a.scraper.Scrape(ctx, normalizedURL, strings.ToUpper(country))
+	scrapeCtx, cancel := context.WithTimeout(ctx, previewScrapeTimeout)
+	defer cancel()
+	result, err := a.scraper.Scrape(scrapeCtx, normalizedURL, strings.ToUpper(country))
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return domain.ProductPreview{}, fmt.Errorf("preview scrape timed out after %s", previewScrapeTimeout)
+		}
 		return domain.ProductPreview{}, err
 	}
 	now := time.Now().UTC()
