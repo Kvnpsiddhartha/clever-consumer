@@ -2,8 +2,11 @@
 # Project, deliberately separate from clever-consumer-backend/-frontend (see
 # repo root README "Deployment" section) so redeploys here never touch the real app.
 #
-# Before first deploy: create a Neon Postgres project (or reuse the one the main app
-# uses) and run `psql "$DATABASE_URL" -f demo-store/db/schema.sql` against it once.
+# Before first deploy: reuse the same Postgres instance the main app uses (Neon or
+# Supabase both work) and run `psql "$DATABASE_URL" -f demo-store/db/schema.sql`
+# against it once. If using Supabase, use the CONNECTION POOLER string, not the direct
+# `db.<ref>.supabase.co` host -- see the root render.yaml's comment for why (IPv6-only,
+# unreachable from Render's compute).
 
 services:
   - type: web
@@ -15,7 +18,7 @@ services:
     plan: free
     envVars:
       - key: DATABASE_URL
-        sync: false # same Neon instance as the main app; this service only touches the demo_store schema
+        sync: false # same Postgres instance as the main app; this service only touches the demo_store schema (Supabase: use the pooler string)
       - key: ROTATE_EVERY_N
         value: "4"
       - key: DEFAULT_CURRENCY

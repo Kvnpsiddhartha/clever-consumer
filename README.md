@@ -172,27 +172,33 @@ When running through Docker Compose, these variables can be exported in your she
 
 ## Deployment
 
-Everything deploys free on **Render**, split into two Render Projects, plus **Neon** for Postgres (Neon's free tier has no time-based expiry, unlike Render's own free Postgres which is deleted 30 days after creation):
+Everything deploys free on **Render**, split into two Render Projects, plus a separately-hosted Postgres (Neon or Supabase both work; Render's own free Postgres is deleted 30 days after creation):
 
 | Piece | Where | Type |
 |---|---|---|
 | Go backend (`APP_ROLE=all`) | Render, Project `clever-consumer` | Web Service, Docker (`backend/Dockerfile`) |
 | React web app (`web/clever-consumer`) | Render, Project `clever-consumer` | Static Site (`pnpm build`, publish `dist`) |
 | `demo-store/` | Render, Project `demo-store` (kept separate so redeploys never touch the real app) | Web Service, Node (`pnpm build` / `pnpm start`) |
-| Postgres | Neon | shared by both the main app and `demo-store`'s own `demo_store` schema |
+| Postgres | Neon or Supabase | shared by both the main app and `demo-store`'s own `demo_store` schema |
 
 Blueprints are checked in: `render.yaml` (backend + frontend) and `demo-store/render.yaml` (demo store) — in the Render dashboard use **New → Blueprint** and point at this repo for each.
+
+> **If using Supabase:** use the **connection pooler** string (Project → Connect → Session pooler, `aws-0-<region>.pooler.supabase.com`, username `postgres.<project-ref>`), not the direct `db.<project-ref>.supabase.co` host. The direct host resolves to an IPv6-only address; Render's compute has no IPv6 egress and will loop forever on `dial tcp ...: network is unreachable`, never binding its port. This applies to both the backend and demo-store services.
 
 Setup, once:
 
 ```sh
-# 1. Create a Neon project, then apply schema to it:
-psql "$NEON_DATABASE_URL" -f backend/migrations/000001_initial.sql
-psql "$NEON_DATABASE_URL" -f backend/migrations/000002_domain_scraper_collector_pool.sql
-psql "$NEON_DATABASE_URL" -f demo-store/db/schema.sql
+# 1. Create the Postgres database, then apply schema to it (no local psql needed --
+#    this works from any machine with Docker):
+docker run --rm --network host -v "$(pwd)/backend/migrations:/m:ro" postgres:17 \
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /m/000001_initial.sql -f /m/000002_domain_scraper_collector_pool.sql
+docker run --rm --network host -v "$(pwd)/demo-store/db:/m:ro" postgres:17 \
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /m/schema.sql
+# (--network host is only needed if $DATABASE_URL is the IPv6-only direct Supabase
+# host; drop it when applying against the pooler string or a plain IPv4 host like Neon.)
 
 # 2. Deploy clever-consumer/render.yaml as the "clever-consumer" Render Project.
-#    Set on the backend service: DATABASE_URL (Neon), PUBLIC_BASE_URL (frontend's
+#    Set on the backend service: DATABASE_URL, PUBLIC_BASE_URL (frontend's
 #    Render URL, once known), BRIGHTDATA_* (from your local .env), and optionally
 #    GOOGLE_CLIENT_ID/SECRET + GOOGLE_REDIRECT_URL (must match a redirect URI
 #    registered in Google Cloud Console).
@@ -200,7 +206,7 @@ psql "$NEON_DATABASE_URL" -f demo-store/db/schema.sql
 #    this is read at BUILD time (Vite inlines it), so set it before the first deploy.
 
 # 3. Deploy demo-store/render.yaml as its own "demo-store" Render Project.
-#    Set DATABASE_URL to the same Neon connection string.
+#    Set DATABASE_URL to the same Postgres connection string.
 ```
 
 Because the backend and frontend end up on different `*.onrender.com` hosts, every

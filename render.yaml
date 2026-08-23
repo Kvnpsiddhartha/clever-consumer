@@ -1,8 +1,16 @@
 # Render Blueprint for the clever-consumer app (backend API+worker + frontend static site).
 # Deploy: Render dashboard -> New -> Blueprint -> point at this repo.
-# Postgres is intentionally NOT declared here -- use a Neon free-tier database instead
-# (Render's free Postgres expires 30 days after creation). Create it separately and
-# paste the connection string into DATABASE_URL below after the blueprint is applied.
+# Postgres is intentionally NOT declared here -- use a separately-hosted free database
+# (Neon or Supabase both work; Render's own free Postgres expires 30 days after
+# creation). Create it separately and paste the connection string into DATABASE_URL
+# below after the blueprint is applied.
+#
+# If using Supabase: use the CONNECTION POOLER string (Project -> Connect -> Session
+# pooler), not the direct `db.<ref>.supabase.co` host. The direct host resolves to an
+# IPv6-only address, and Render's compute has no IPv6 egress -- the backend will loop
+# forever on "network is unreachable" and never bind its port if you use it. The pooler
+# host (`aws-0-<region>.pooler.supabase.com`, username `postgres.<project-ref>`) is
+# IPv4-reachable and works fine.
 #
 # See README.md "Deployment" section for the full env var reference and setup steps.
 
@@ -22,7 +30,7 @@ services:
       - key: SESSION_COOKIE_NAME
         value: cc_session
       - key: DATABASE_URL
-        sync: false # set manually to your Neon connection string (sslmode=require)
+        sync: false # set manually (Supabase: use the pooler string, not the direct host -- see comment above)
       - key: PUBLIC_BASE_URL
         sync: false # set manually once the frontend static site URL is known
       - key: GOOGLE_REDIRECT_URL

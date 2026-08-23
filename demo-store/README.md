@@ -31,7 +31,7 @@ DOM/visual layout around it changes.
 ## Local setup
 
 ```
-cp .env.example .env.local   # set DATABASE_URL to the same Neon instance the main app uses
+cp .env.example .env.local   # set DATABASE_URL to the same Postgres instance the main app uses
 psql "$DATABASE_URL" -f db/schema.sql   # once, adds the demo_store schema/table
 pnpm install
 pnpm dev
@@ -42,7 +42,7 @@ default 4) to see the layout and JSON-LD placement rotate.
 
 ## Live demo controls
 
-Rotation is **global and DB-backed** (same Neon Postgres as the main app, its own
+Rotation is **global and DB-backed** (same Postgres as the main app, its own
 `demo_store` schema) — it advances on every real request, including Bright Data's own
 fetches, not per-browser. Three ways to control it during a live demo:
 

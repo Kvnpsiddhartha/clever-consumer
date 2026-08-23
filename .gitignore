@@ -6,4 +6,5 @@ dist/
 .pnpm-store/
 
 .env
+supabase.yml
 .DS_Store
