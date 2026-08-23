@@ -3,6 +3,7 @@ package scraping
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -41,6 +42,8 @@ type CollectorStore interface {
 
 type CollectorThresholds = domain.CollectorThresholds
 
+const collectorRunAttemptTimeout = 45 * time.Second
+
 type Manager struct {
 	store      CollectorStore
 	provider   Provider
@@ -68,7 +71,9 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 		return m.provider.GenericScrape(ctx, targetURL, country)
 	}
 
-	result, err := m.provider.RunCollector(ctx, target.Collector.ExternalCollectorID, targetURL, country)
+	collectorCtx, cancelCollector := collectorRunContext(ctx)
+	result, err := m.provider.RunCollector(collectorCtx, target.Collector.ExternalCollectorID, targetURL, country)
+	cancelCollector()
 	if err == nil {
 		_ = m.store.RecordCollectorSuccess(ctx, target.Collector.ID, time.Now().UTC())
 		if target.Provision != nil {
@@ -87,6 +92,13 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	storeCtx, cancel := collectorStoreContext()
 	_ = m.store.RecordCollectorFailure(storeCtx, target.Collector.ID, failureMessage, structural, time.Now().UTC())
 	cancel()
+	if shouldFallbackFromCollectorFailure(err) {
+		result, genericErr := m.provider.GenericScrape(ctx, targetURL, country)
+		if genericErr == nil {
+			return result, nil
+		}
+		return domain.ScrapeResult{}, fmt.Errorf("collector timed out; generic scrape failed: %v", genericErr)
+	}
 	if !structural {
 		return domain.ScrapeResult{}, err
 	}
@@ -116,6 +128,17 @@ func (m *Manager) Scrape(ctx context.Context, targetURL, country string) (domain
 	}
 	_ = m.store.RecordCollectorSuccess(ctx, target.Collector.ID, time.Now().UTC())
 	return result, nil
+}
+
+func collectorRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= collectorRunAttemptTimeout {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, collectorRunAttemptTimeout)
+}
+
+func shouldFallbackFromCollectorFailure(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 func (m *Manager) HealCollector(ctx context.Context, collector domain.ScraperCollector, targetURL, country, reason string) error {

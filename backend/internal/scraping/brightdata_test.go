@@ -89,18 +89,20 @@ func TestBrightDataAPIParsesUnlockerProductEnvelope(t *testing.T) {
 	}
 }
 
-func TestBrightDataUsesAmazonDatasetByDefault(t *testing.T) {
-	var sawDatasetCall bool
+func TestBrightDataUsesUnlockerWhenDatasetIsNotSeeded(t *testing.T) {
+	var requestBody struct {
+		Zone string `json:"zone"`
+		URL  string `json:"url"`
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/datasets/v3/scrape" {
+		if r.URL.Path != "/request" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		sawDatasetCall = true
-		if got := r.URL.Query().Get("dataset_id"); got != "gd_l7q7dkf244hwjntr0" {
-			t.Fatalf("unexpected dataset id: %s", got)
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"title":"Marvel Spiderman Collectible","price":1499,"currency":"INR","availability":"In Stock","main_image":"https://example.com/spiderman.jpg","url":"https://www.amazon.in/dp/B0G4MLD5N8"}`))
+		_, _ = w.Write([]byte(`{"status_code":200,"body":"{\"title\":\"Marvel Spiderman Collectible\",\"price\":1499,\"currency\":\"INR\",\"availability\":\"In Stock\",\"main_image\":\"https://example.com/spiderman.jpg\",\"url\":\"https://www.amazon.in/dp/B0G4MLD5N8\"}"}`))
 	}))
 	defer server.Close()
 
@@ -109,11 +111,54 @@ func TestBrightDataUsesAmazonDatasetByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sawDatasetCall {
-		t.Fatal("expected dataset call")
+	if requestBody.Zone != "cli_unlocker" {
+		t.Fatalf("unexpected unlocker request: %+v", requestBody)
 	}
-	if result.Name != "Marvel Spiderman Collectible" || result.CurrentPrice != 1499 || result.Method != "brightdata_dataset" {
+	if result.Name != "Marvel Spiderman Collectible" || result.CurrentPrice != 1499 || result.Method != "brightdata_generic_api" {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestBrightDataParsesGraphWrappedProductJSONLD(t *testing.T) {
+	html := []byte(`<!doctype html>
+<html>
+	<head><title>Stridex Market</title></head>
+	<body>
+		<script type="application/ld+json">
+			{
+				"@context": "http://schema.org/",
+				"@graph": [
+					{"@type": "Organization", "name": "Stridex Market"},
+					{"@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "name": "shoes"}]},
+					{
+						"@type": "Product",
+						"name": "Trailblaze Trail Sneaker",
+						"image": [
+							"https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/1.webp",
+							"https://cdn.dummyjson.com/product-images/mens-shoes/sports-sneakers-off-white-red/2.webp"
+						],
+						"offers": {
+							"@type": "Offer",
+							"priceCurrency": "INR",
+							"price": 6499,
+							"availability": "InStock"
+						}
+					}
+				]
+			}
+		</script>
+	</body>
+</html>`)
+
+	result, err := decodeProductResult(html, "https://demo-store-lq1o.onrender.com/product/trailblaze-hiking-boot", "IN", "brightdata_generic_api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "Trailblaze Trail Sneaker" || result.CurrentPrice != 6499 || result.Currency != "INR" || result.Availability != "in_stock" {
+		t.Fatalf("unexpected graph product result: %+v", result)
+	}
+	if result.ImageURL == "" {
+		t.Fatalf("expected graph product image, got %+v", result)
 	}
 }
 

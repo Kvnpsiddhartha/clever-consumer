@@ -78,6 +78,29 @@ func TestManagerDoesNotHealCommandFailure(t *testing.T) {
 	}
 }
 
+func TestManagerFallsBackToGenericOnCollectorTimeout(t *testing.T) {
+	store := &fakeCollectorStore{
+		target: domain.ScrapeTarget{
+			Collector: &domain.ScraperCollector{ID: "dsc_1", ExternalCollectorID: "collector_1"},
+		},
+	}
+	provider := &fakeProvider{
+		runErrors: []error{context.DeadlineExceeded},
+	}
+	manager := NewManager(store, provider, domain.CollectorThresholds{MaxPerDomain: 3}, logging.Nop())
+
+	result, err := manager.Scrape(context.Background(), "https://shop.example/products/1", "IN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Method != "fake_generic" {
+		t.Fatalf("expected generic fallback result, got %+v", result)
+	}
+	if provider.healCalls != 0 || store.startHealingCalls != 0 {
+		t.Fatalf("did not expect heal for collector timeout, provider=%d start=%d", provider.healCalls, store.startHealingCalls)
+	}
+}
+
 func TestManagerProvisionsCollectorInBackgroundAndReturnsGenericResult(t *testing.T) {
 	store := &fakeCollectorStore{
 		target: domain.ScrapeTarget{

@@ -80,7 +80,7 @@ func (b *BrightDataAPI) DatasetID(domainName string) (string, bool) {
 	if datasetID, ok := lookupDomainMap(b.datasets, domainName); ok {
 		return datasetID, true
 	}
-	return defaultDatasetID(domainName)
+	return "", false
 }
 
 func (b *BrightDataAPI) DiscoverCollectors(ctx context.Context, domainName string) ([]DiscoveredCollector, error) {
@@ -612,18 +612,28 @@ func unlockerBodyPayload(payload []byte) ([]byte, bool) {
 }
 
 func hasProductFields(value genericScrapeOutput) bool {
+	return productIdentity(value) != "" && productCommerceSignal(value)
+}
+
+func productIdentity(value genericScrapeOutput) string {
 	return coalesce(
 		firstStringValue(value.Name),
 		firstStringValue(value.Title),
 		firstStringValue(value.ProductName),
+	)
+}
+
+func productCommerceSignal(value genericScrapeOutput) bool {
+	return coalesce(
 		firstStringValue(value.Currency),
 		firstStringValue(value.CurrencyCode),
 		firstStringValue(value.PriceCurrency),
 		firstStringValue(offerField(value.Offers, "priceCurrency", "price_currency", "currency", "currency_code")),
-		availabilityValue(value.Availability),
-		availabilityValue(value.StockStatus),
-		availabilityValue(offerField(value.Offers, "availability", "stock_status")),
-	) != "" || numberValue(value.Price) > 0 || numberValue(value.CurrentPrice) > 0 || numberValue(value.FinalPrice) > 0 || numberValue(offerField(value.Offers, "price", "current_price", "final_price", "amount")) > 0
+	) != "" ||
+		numberValue(value.Price) > 0 ||
+		numberValue(value.CurrentPrice) > 0 ||
+		numberValue(value.FinalPrice) > 0 ||
+		numberValue(offerField(value.Offers, "price", "current_price", "final_price", "amount")) > 0
 }
 
 func scraperDescription() string {
@@ -929,36 +939,6 @@ func lookupDomainMap(values map[string]string, domainName string) (string, bool)
 			break
 		}
 		domainName = rest
-	}
-	return "", false
-}
-
-func defaultDatasetID(domainName string) (string, bool) {
-	domainName = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domainName)), "www.")
-	if domainName == "" {
-		return "", false
-	}
-	for _, suffix := range []string{
-		"amazon.ae",
-		"amazon.ca",
-		"amazon.co.jp",
-		"amazon.co.uk",
-		"amazon.com",
-		"amazon.com.au",
-		"amazon.com.br",
-		"amazon.com.mx",
-		"amazon.de",
-		"amazon.es",
-		"amazon.fr",
-		"amazon.in",
-		"amazon.it",
-		"amazon.nl",
-		"amazon.sa",
-		"amazon.sg",
-	} {
-		if domainName == suffix || strings.HasSuffix(domainName, "."+suffix) {
-			return "gd_l7q7dkf244hwjntr0", true
-		}
 	}
 	return "", false
 }
