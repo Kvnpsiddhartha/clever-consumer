@@ -1,0 +1,26 @@
+# Render Blueprint for the demo-store scrape-target site. Deployed as its own Render
+# Project, deliberately separate from clever-consumer-backend/-frontend (see
+# repo root README "Deployment" section) so redeploys here never touch the real app.
+#
+# Before first deploy: create a Neon Postgres project (or reuse the one the main app
+# uses) and run `psql "$DATABASE_URL" -f demo-store/db/schema.sql` against it once.
+
+services:
+  - type: web
+    name: demo-store
+    runtime: node
+    rootDir: demo-store
+    buildCommand: pnpm install && pnpm build
+    startCommand: pnpm start
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false # same Neon instance as the main app; this service only touches the demo_store schema
+      - key: ROTATE_EVERY_N
+        value: "4"
+      - key: DEFAULT_CURRENCY
+        value: INR
+      - key: STORE_BRAND_NAME
+        value: Stridex Market
+      - key: ADMIN_TOKEN
+        sync: false # optional
