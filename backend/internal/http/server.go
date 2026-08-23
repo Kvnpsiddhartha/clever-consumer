@@ -36,6 +36,8 @@ func NewServer(cfg config.Config, app *services.Application, logger *zap.Sugared
 	mux.Handle("POST /v1/trackers/{id}/resume", protected(http.HandlerFunc(api.ResumeTracker)))
 	mux.Handle("POST /v1/trackers/{id}/run", protected(http.HandlerFunc(api.RunTracker)))
 	mux.Handle("GET /v1/trackers/{id}/observations", protected(http.HandlerFunc(api.Observations)))
+	mux.Handle("GET /v1/scraper/collectors", protected(http.HandlerFunc(api.ListCollectors)))
+	mux.Handle("POST /v1/scraper/collectors/{id}/heal", protected(http.HandlerFunc(api.HealCollector)))
 
 	handler := middleware.CORS(middleware.Correlation(middleware.RequestLogger(logger)(mux)))
 	return &http.Server{

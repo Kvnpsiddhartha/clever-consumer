@@ -1,5 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Activity,
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Check,
@@ -11,13 +13,15 @@ import {
   Pause,
   Play,
   Plus,
-  Settings2,
+  RefreshCw,
+  ServerCog,
   Trash2,
   UserRound,
+  Wrench,
   X,
 } from 'lucide-react'
 import { api } from './api/client'
-import type { AlertRule, Observation, ProductPreview, Tracker, User } from './types/api'
+import type { AlertRule, CollectorOperationsProfile, Observation, ProductPreview, ScraperCollector, Tracker, User } from './types/api'
 
 const defaultRules: AlertRule[] = [
   { type: 'price_drop' },
@@ -25,6 +29,17 @@ const defaultRules: AlertRule[] = [
 ]
 
 type SidebarTab = 'dashboard' | 'user' | 'scraper'
+type RunPhase = 'starting' | 'running' | 'fetching' | 'saving' | 'complete' | 'failed'
+
+type ProductRunStatus = {
+  trackerId: string
+  phase: RunPhase
+  startedAtMs: number
+  updatedAtMs: number
+  finishedAtMs?: number
+  observation?: Observation
+  error?: string
+}
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -48,6 +63,11 @@ function App() {
   const [productTracker, setProductTracker] = useState<Tracker | null>(null)
   const [productObservations, setProductObservations] = useState<Observation[]>([])
   const [productLoading, setProductLoading] = useState(false)
+  const [runStatus, setRunStatus] = useState<ProductRunStatus | null>(null)
+  const [runNowMs, setRunNowMs] = useState(() => Date.now())
+  const [collectorProfiles, setCollectorProfiles] = useState<CollectorOperationsProfile[]>([])
+  const [collectorsLoading, setCollectorsLoading] = useState(false)
+  const [healingCollectorId, setHealingCollectorId] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const addProductButtonRef = useRef<HTMLButtonElement>(null)
@@ -105,12 +125,36 @@ function App() {
     }
   }, [])
 
+  const refreshCollectors = useCallback(async () => {
+    setCollectorsLoading(true)
+    setMessage('')
+    try {
+      const response = await api.listCollectors()
+      setCollectorProfiles(response.items)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Collectors could not be loaded')
+    } finally {
+      setCollectorsLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     if (!user || !productRouteId) return
     setActiveSidebarTab('dashboard')
     setSelectedTracker(null)
     loadProductPage(productRouteId)
   }, [loadProductPage, productRouteId, user])
+
+  useEffect(() => {
+    if (!user || activeSidebarTab !== 'scraper') return
+    refreshCollectors()
+  }, [activeSidebarTab, refreshCollectors, user])
+
+  useEffect(() => {
+    if (!runStatus || !isRunActive(runStatus)) return
+    const ticker = window.setInterval(() => setRunNowMs(Date.now()), 1000)
+    return () => window.clearInterval(ticker)
+  }, [runStatus])
 
   useEffect(() => {
     if (!addModalOpen) return
@@ -271,22 +315,76 @@ function App() {
     setMessage('Scraper defaults updated for new trackers.')
   }
 
-  async function runNow(tracker: Tracker) {
-    setBusy(true)
+  async function healCollector(collector: ScraperCollector) {
+    setHealingCollectorId(collector.id)
     setMessage('')
     try {
-      await api.runTracker(tracker.id)
+      const reason = collector.last_error || 'Manual Bright Data collector heal requested'
+      await api.healCollector(collector.id, reason)
+      await refreshCollectors()
+      setMessage('Collector healing started.')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Collector healing failed')
+      await refreshCollectors().catch(() => undefined)
+    } finally {
+      setHealingCollectorId('')
+    }
+  }
+
+  async function runNow(tracker: Tracker) {
+    const startedAtMs = Date.now()
+    const phaseTimers = [
+      window.setTimeout(() => advanceRunPhase(tracker.id, startedAtMs, 'running'), 700),
+      window.setTimeout(() => advanceRunPhase(tracker.id, startedAtMs, 'fetching'), 8000),
+    ]
+
+    setBusy(true)
+    setMessage('')
+    setRunNowMs(startedAtMs)
+    setRunStatus({
+      trackerId: tracker.id,
+      phase: 'starting',
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+    })
+    try {
+      const observation = await api.runTracker(tracker.id)
+      setRunStatus((current) => current?.trackerId === tracker.id && current.startedAtMs === startedAtMs
+        ? { ...current, phase: 'saving', observation, updatedAtMs: Date.now() }
+        : current)
       await refreshTrackers()
       if (productRouteId === tracker.id) {
         await loadProductPage(tracker.id)
       } else {
         await loadObservations(tracker)
       }
+      const finishedAtMs = Date.now()
+      setRunNowMs(finishedAtMs)
+      setRunStatus((current) => current?.trackerId === tracker.id && current.startedAtMs === startedAtMs
+        ? { ...current, phase: 'complete', observation, finishedAtMs, updatedAtMs: finishedAtMs }
+        : current)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Manual run failed')
+      const message = error instanceof Error ? error.message : 'Manual run failed'
+      const finishedAtMs = Date.now()
+      setRunNowMs(finishedAtMs)
+      setRunStatus((current) => current?.trackerId === tracker.id && current.startedAtMs === startedAtMs
+        ? { ...current, phase: 'failed', error: message, finishedAtMs, updatedAtMs: finishedAtMs }
+        : current)
+      setMessage(message)
     } finally {
+      phaseTimers.forEach((timer) => window.clearTimeout(timer))
       setBusy(false)
     }
+  }
+
+  function advanceRunPhase(trackerId: string, startedAtMs: number, phase: RunPhase) {
+    setRunNowMs(Date.now())
+    setRunStatus((current) => {
+      if (!current || current.trackerId !== trackerId || current.startedAtMs !== startedAtMs || !isRunActive(current)) {
+        return current
+      }
+      return { ...current, phase, updatedAtMs: Date.now() }
+    })
   }
 
   async function toggleTracker(tracker: Tracker) {
@@ -446,13 +544,13 @@ function App() {
           <button
             className={`nav-button ${activeSidebarTab === 'scraper' ? 'active' : ''}`}
             type="button"
-            aria-label="Scraper settings"
+            aria-label="Collectors"
             aria-current={activeSidebarTab === 'scraper' ? 'page' : undefined}
-            title={sidebarOpen ? undefined : 'Scraper settings'}
+            title={sidebarOpen ? undefined : 'Collectors'}
             onClick={() => selectSidebarTab('scraper')}
           >
-            <Settings2 aria-hidden="true" />
-            <span>Scraper settings</span>
+            <ServerCog aria-hidden="true" />
+            <span>Collectors</span>
           </button>
         </nav>
 
@@ -499,6 +597,8 @@ function App() {
                 tracker={currentProduct}
                 observations={productObservations}
                 busy={busy}
+                runStatus={runStatus?.trackerId === currentProduct.id ? runStatus : null}
+                runNowMs={runNowMs}
                 onRunNow={runNow}
                 onToggle={toggleTracker}
                 onDelete={deleteTracker}
@@ -637,20 +737,33 @@ function App() {
         )}
 
         {activeSidebarTab === 'scraper' && (
-          <section className="settings-page" aria-labelledby="scraper-settings-title">
+          <section className="settings-page collectors-page" aria-labelledby="collector-ops-title">
             <header className="workspace-header">
               <div className="workspace-title-row">
                 <SidebarToggle open={sidebarOpen} onToggle={() => setSidebarOpen((open) => !open)} />
                 <div>
-                  <p className="eyebrow">Settings</p>
-                  <h1 id="scraper-settings-title">Scraper settings</h1>
+                  <p className="eyebrow">Bright Data</p>
+                  <h1 id="collector-ops-title">Collector operations</h1>
                 </div>
+              </div>
+              <div className="header-actions">
+                <button className="secondary" type="button" onClick={refreshCollectors} disabled={collectorsLoading}>
+                  <RefreshCw aria-hidden="true" />
+                  <span>{collectorsLoading ? 'Refreshing...' : 'Refresh'}</span>
+                </button>
               </div>
             </header>
 
             {message && <p className="notice" role="status" aria-live="polite">{message}</p>}
 
-            <div className="settings-layout">
+            <div className="collector-summary-grid" aria-label="Collector totals">
+              <MetricTile label="Domains" value={collectorProfiles.length} />
+              <MetricTile label="Collectors" value={collectorTotal(collectorProfiles, 'all')} />
+              <MetricTile label="Runs" value={collectorRunTotal(collectorProfiles)} />
+              <MetricTile label="Errors" value={collectorErrorTotal(collectorProfiles)} tone={collectorErrorTotal(collectorProfiles) > 0 ? 'warning' : 'default'} />
+            </div>
+
+            <div className="settings-layout collector-settings-layout">
               <section className="settings-section" aria-labelledby="scraper-defaults-title">
                 <div className="settings-copy">
                   <p className="eyebrow">Tracker defaults</p>
@@ -681,21 +794,52 @@ function App() {
 
               <section className="settings-section" aria-labelledby="scraper-status-title">
                 <div className="settings-copy">
-                  <p className="eyebrow">Services</p>
-                  <h2 id="scraper-status-title">Scraper status</h2>
+                  <p className="eyebrow">Provider</p>
+                  <h2 id="scraper-status-title">Bright Data flow</h2>
                 </div>
                 <div className="scraper-list">
                   <div>
-                    <span>Product preview scraper</span>
-                    <strong>Configured</strong>
+                    <span>Scraper Studio collectors</span>
+                    <strong>Enabled</strong>
                   </div>
                   <div>
-                    <span>Price and availability checks</span>
-                    <strong>Configured</strong>
+                    <span>Unlocker and dataset fallback</span>
+                    <strong>Enabled</strong>
+                  </div>
+                  <div>
+                    <span>Self-healing refactor flow</span>
+                    <strong>Enabled</strong>
                   </div>
                 </div>
               </section>
             </div>
+
+            {collectorsLoading && collectorProfiles.length === 0 && (
+              <section className="empty-state" aria-live="polite">
+                <p className="eyebrow">Loading</p>
+                <h2>Loading collectors.</h2>
+              </section>
+            )}
+
+            {!collectorsLoading && collectorProfiles.length === 0 && (
+              <section className="empty-state" aria-labelledby="collectors-empty-title">
+                <p className="eyebrow">No collector traffic</p>
+                <h2 id="collectors-empty-title">Run a product preview to create collector telemetry.</h2>
+              </section>
+            )}
+
+            {collectorProfiles.length > 0 && (
+              <section className="collector-domain-list" aria-label="Bright Data collector domains">
+                {collectorProfiles.map((profile) => (
+                  <CollectorDomainPanel
+                    key={profile.id}
+                    profile={profile}
+                    healingCollectorId={healingCollectorId}
+                    onHeal={healCollector}
+                  />
+                ))}
+              </section>
+            )}
           </section>
         )}
       </section>
@@ -782,6 +926,8 @@ function ProductDetail({
   tracker,
   observations,
   busy,
+  runStatus,
+  runNowMs,
   onRunNow,
   onToggle,
   onDelete,
@@ -789,10 +935,17 @@ function ProductDetail({
   tracker: Tracker
   observations: Observation[]
   busy: boolean
+  runStatus: ProductRunStatus | null
+  runNowMs: number
   onRunNow: (tracker: Tracker) => void
   onToggle: (tracker: Tracker) => void
   onDelete: (tracker: Tracker) => void
 }) {
+  const latestObservation = latestRun(observations)
+  const running = runStatus ? isRunActive(runStatus) : false
+  const runElapsedMs = runStatus ? (runStatus.finishedAtMs ?? runNowMs) - runStatus.startedAtMs : 0
+  const displayedObservations = [...observations].reverse()
+
   return (
     <div className="product-detail-layout">
       <section className="product-detail-panel" aria-labelledby="product-detail-title">
@@ -848,9 +1001,9 @@ function ProductDetail({
           </div>
 
           <div className="button-row product-detail-actions">
-            <button className="secondary small" type="button" onClick={() => onRunNow(tracker)} disabled={busy}>
-              <Play aria-hidden="true" />
-              <span>Run now</span>
+            <button className="secondary small" type="button" onClick={() => onRunNow(tracker)} disabled={busy || running}>
+              {running ? <RefreshCw className="run-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
+              <span>{running ? 'Running...' : 'Run now'}</span>
             </button>
             <button className="secondary small" type="button" onClick={() => onToggle(tracker)}>
               {tracker.status === 'paused' ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
@@ -868,15 +1021,37 @@ function ProductDetail({
         </div>
       </section>
 
+      <RunStatusCard
+        runStatus={runStatus}
+        elapsedMs={runElapsedMs}
+        latestObservation={latestObservation}
+        tracker={tracker}
+      />
+
       <section className="history-panel product-history" aria-labelledby="product-history-title">
-        <h2 id="product-history-title">Price history</h2>
+        <div className="section-title-row">
+          <div>
+            <p className="eyebrow">Runs</p>
+            <h2 id="product-history-title">Price history</h2>
+          </div>
+          <span>{observations.length} total</span>
+        </div>
         {observations.length > 0 ? (
           <div className="history-list">
-            {observations.map((observation) => (
+            {displayedObservations.map((observation) => (
               <div key={observation.id} className="history-row">
-                <span>{formatDate(observation.observed_at)}</span>
-                <strong>{formatMoney(observation.price, observation.currency)}</strong>
-                <span>{observation.method}</span>
+                <div>
+                  <strong>{formatDate(observation.observed_at)}</strong>
+                  <span>{observation.method}</span>
+                </div>
+                <div>
+                  <strong>{formatMoney(observation.price, observation.currency)}</strong>
+                  <span>{availabilityLabel(observation.availability)}</span>
+                </div>
+                <div>
+                  <strong>{Math.round(observation.confidence * 100)}%</strong>
+                  <span>confidence</span>
+                </div>
               </div>
             ))}
           </div>
@@ -885,6 +1060,171 @@ function ProductDetail({
         )}
       </section>
     </div>
+  )
+}
+
+function RunStatusCard({
+  runStatus,
+  elapsedMs,
+  latestObservation,
+  tracker,
+}: {
+  runStatus: ProductRunStatus | null
+  elapsedMs: number
+  latestObservation?: Observation
+  tracker: Tracker
+}) {
+  const phase = runStatus?.phase ?? 'complete'
+  const running = runStatus ? isRunActive(runStatus) : false
+  const statusClass = runStatus ? `run-status-${runStatus.phase}` : 'run-status-ready'
+  const statusLabel = runStatus ? runPhaseLabel(runStatus.phase) : 'Ready'
+  const referenceObservation = runStatus?.observation ?? latestObservation
+
+  return (
+    <section className={`run-status-card ${statusClass}`} aria-labelledby="run-status-title" aria-live="polite">
+      <header className="run-status-header">
+        <div>
+          <p className="eyebrow">Run monitor</p>
+          <h2 id="run-status-title">{runStatus ? runPhaseTitle(runStatus.phase) : 'Ready for manual run'}</h2>
+        </div>
+        <span className="run-status-pill">
+          {running ? <RefreshCw className="run-spin" aria-hidden="true" /> : phase === 'failed' ? <AlertTriangle aria-hidden="true" /> : <Check aria-hidden="true" />}
+          {statusLabel}
+        </span>
+      </header>
+
+      <div className="run-status-grid">
+        <div>
+          <span>Elapsed</span>
+          <strong>{runStatus ? formatElapsed(elapsedMs) : 'Idle'}</strong>
+        </div>
+        <div>
+          <span>Started</span>
+          <strong>{runStatus ? formatTime(runStatus.startedAtMs) : 'Not running'}</strong>
+        </div>
+        <div>
+          <span>Latest price</span>
+          <strong>{referenceObservation ? formatMoney(referenceObservation.price, referenceObservation.currency) : formatMoney(tracker.current_price, tracker.currency)}</strong>
+        </div>
+        <div>
+          <span>Source method</span>
+          <strong>{referenceObservation?.method ?? 'waiting'}</strong>
+        </div>
+      </div>
+
+      {runStatus?.error ? (
+        <p className="run-error">
+          <AlertTriangle aria-hidden="true" />
+          <span>{runStatus.error}</span>
+        </p>
+      ) : (
+        <ol className="run-step-list" aria-label="Manual run progress">
+          {runPhases.map((step) => (
+            <li key={step} className={`run-step run-step-${runStepState(step, runStatus?.phase)}`}>
+              {runStepState(step, runStatus?.phase) === 'done' ? <Check aria-hidden="true" /> : <Clock3 aria-hidden="true" />}
+              <span>{runPhaseLabel(step)}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
+function MetricTile({ label, value, tone = 'default' }: { label: string; value: number | string; tone?: 'default' | 'warning' }) {
+  return (
+    <div className={`metric-tile ${tone === 'warning' ? 'metric-warning' : ''}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function CollectorDomainPanel({
+  profile,
+  healingCollectorId,
+  onHeal,
+}: {
+  profile: CollectorOperationsProfile
+  healingCollectorId: string
+  onHeal: (collector: ScraperCollector) => void
+}) {
+  const totals = collectorProfileTotals(profile)
+  return (
+    <article className="collector-domain-panel">
+      <header className="collector-domain-header">
+        <div>
+          <p className="eyebrow">{profile.status}</p>
+          <h2>{profile.domain}</h2>
+          {profile.latest_product_url && <p>{profile.latest_product_url}</p>}
+        </div>
+        <div className="collector-domain-stats" aria-label={`${profile.domain} collector statistics`}>
+          <MetricTile label="Requests" value={profile.request_count} />
+          <MetricTile label="Products" value={profile.product_count} />
+          <MetricTile label="Collectors" value={profile.collectors.length} />
+          <MetricTile label="Success" value={`${totals.successRate}%`} tone={totals.failures > 0 ? 'warning' : 'default'} />
+        </div>
+      </header>
+
+      {profile.collectors.length === 0 ? (
+        <div className="collector-empty">
+          <Activity aria-hidden="true" />
+          <span>Generic scrape path is active while a Bright Data collector is discovered or provisioned.</span>
+        </div>
+      ) : (
+        <div className="collector-table" role="table" aria-label={`${profile.domain} collectors`}>
+          <div className="collector-table-head" role="row">
+            <span role="columnheader">Collector</span>
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Runs</span>
+            <span role="columnheader">Errors</span>
+            <span role="columnheader">Healing</span>
+          </div>
+          {profile.collectors.map((collector) => (
+            <div className="collector-row" role="row" key={collector.id}>
+              <div role="cell">
+                <strong>{collector.external_collector_id || collector.id}</strong>
+                <span>{collector.provider} · {collectorPurposeLabel(collector.purpose)}</span>
+              </div>
+              <div role="cell">
+                <span className={`collector-status collector-status-${collector.status}`}>
+                  {collector.status === 'healing' ? <Wrench aria-hidden="true" /> : <ServerCog aria-hidden="true" />}
+                  {statusLabel(collector.status)}
+                </span>
+                <span>Updated {formatDate(collector.updated_at)}</span>
+              </div>
+              <div role="cell">
+                <strong>{collector.request_count}</strong>
+                <span>{collector.success_count} ok</span>
+              </div>
+              <div role="cell">
+                <strong>{collector.failure_count}</strong>
+                <span>{collector.consecutive_structural_failures} structural</span>
+              </div>
+              <div role="cell" className="collector-heal-cell">
+                {collector.last_error ? (
+                  <p className="collector-error">
+                    <AlertTriangle aria-hidden="true" />
+                    <span>{collector.last_error}</span>
+                  </p>
+                ) : (
+                  <span className="collector-clean">No recent scrape error</span>
+                )}
+                <button
+                  className="secondary small"
+                  type="button"
+                  onClick={() => onHeal(collector)}
+                  disabled={!collector.external_collector_id || collector.status === 'healing' || healingCollectorId === collector.id}
+                >
+                  <Wrench aria-hidden="true" />
+                  <span>{healingCollectorId === collector.id ? 'Healing...' : 'Heal'}</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </article>
   )
 }
 
@@ -899,6 +1239,18 @@ function formatMoney(value: number, currency: string) {
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+}
+
+function formatTime(value: number) {
+  return new Intl.DateTimeFormat(undefined, { timeStyle: 'medium' }).format(new Date(value))
+}
+
+function formatElapsed(value: number) {
+  const totalSeconds = Math.max(0, Math.floor(value / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes === 0) return `${seconds}s`
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
 }
 
 function intervalLabel(hours: number) {
@@ -925,11 +1277,97 @@ function trackerConditions(tracker: Tracker) {
   return configured.map((rule) => ruleLabel(rule, tracker.currency))
 }
 
+const runPhases: RunPhase[] = ['starting', 'running', 'fetching', 'saving']
+
+function isRunActive(status: ProductRunStatus) {
+  return status.phase !== 'complete' && status.phase !== 'failed'
+}
+
+function latestRun(observations: Observation[]) {
+  return observations.at(-1)
+}
+
+function runPhaseLabel(phase: RunPhase) {
+  switch (phase) {
+    case 'starting':
+      return 'Starting'
+    case 'running':
+      return 'Running scraper'
+    case 'fetching':
+      return 'Fetching details'
+    case 'saving':
+      return 'Saving result'
+    case 'complete':
+      return 'Completed'
+    case 'failed':
+      return 'Failed'
+  }
+}
+
+function runPhaseTitle(phase: RunPhase) {
+  switch (phase) {
+    case 'starting':
+      return 'Starting manual run'
+    case 'running':
+      return 'Scraper is running'
+    case 'fetching':
+      return 'Fetching product details'
+    case 'saving':
+      return 'Saving price observation'
+    case 'complete':
+      return 'Run completed'
+    case 'failed':
+      return 'Run failed'
+  }
+}
+
+function runStepState(step: RunPhase, current?: RunPhase) {
+  if (!current) return 'pending'
+  if (current === 'failed') return 'pending'
+  const currentIndex = runPhases.indexOf(current)
+  const stepIndex = runPhases.indexOf(step)
+  if (current === 'complete' || stepIndex < currentIndex) return 'done'
+  if (stepIndex === currentIndex) return 'active'
+  return 'pending'
+}
+
 function ruleLabel(rule: AlertRule, currency: string) {
   if (rule.type === 'target_price' && rule.threshold_price) {
     return `Target ${formatMoney(rule.threshold_price, currency)}`
   }
   return rule.type.replaceAll('_', ' ')
+}
+
+function collectorTotal(profiles: CollectorOperationsProfile[], status: 'all' | ScraperCollector['status']) {
+  return profiles.reduce((sum, profile) => {
+    return sum + profile.collectors.filter((collector) => status === 'all' || collector.status === status).length
+  }, 0)
+}
+
+function collectorRunTotal(profiles: CollectorOperationsProfile[]) {
+  return profiles.reduce((sum, profile) => sum + profile.collectors.reduce((collectorSum, collector) => collectorSum + collector.request_count, 0), 0)
+}
+
+function collectorErrorTotal(profiles: CollectorOperationsProfile[]) {
+  return profiles.reduce((sum, profile) => sum + profile.collectors.reduce((collectorSum, collector) => collectorSum + collector.failure_count, 0), 0)
+}
+
+function collectorProfileTotals(profile: CollectorOperationsProfile) {
+  const successes = profile.collectors.reduce((sum, collector) => sum + collector.success_count, 0)
+  const failures = profile.collectors.reduce((sum, collector) => sum + collector.failure_count, 0)
+  const total = successes + failures
+  return {
+    failures,
+    successRate: total === 0 ? 0 : Math.round((successes / total) * 100),
+  }
+}
+
+function collectorPurposeLabel(value: string) {
+  return value.replaceAll('_', ' ')
+}
+
+function statusLabel(value: string) {
+  return value.replaceAll('_', ' ')
 }
 
 function SidebarToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {

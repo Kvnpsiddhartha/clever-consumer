@@ -268,6 +268,29 @@ func (a *API) Observations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (a *API) ListCollectors(w http.ResponseWriter, r *http.Request) {
+	items, err := a.app.ListCollectorOperations(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "collector_list_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (a *API) HealCollector(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := a.app.HealCollector(r.Context(), r.PathValue("id"), req.Reason); err != nil {
+		writeError(w, r, http.StatusBadRequest, "collector_heal_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "healing_started"})
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(target); err != nil {

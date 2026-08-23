@@ -1,4 +1,4 @@
-import type { AlertRule, Observation, ProductPreview, Tracker, User } from '../types/api'
+import type { AlertRule, CollectorOperationsProfile, Observation, ProductPreview, Tracker, User } from '../types/api'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:18080'
 
@@ -88,5 +88,14 @@ export const api = {
   },
   observations(id: string) {
     return request<ItemList<Observation>>(`/v1/trackers/${id}/observations`)
+  },
+  listCollectors() {
+    return request<ItemList<CollectorOperationsProfile>>('/v1/scraper/collectors')
+  },
+  healCollector(id: string, reason: string) {
+    return request<{ status: string }>(`/v1/scraper/collectors/${id}/heal`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    })
   },
 }

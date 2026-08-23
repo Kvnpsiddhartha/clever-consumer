@@ -1,6 +1,6 @@
 # Clever Consumer
-
-If you are someone who wants to track products and price changes, Clever Consumer is just the right tool for you.
+## A Provider Agnostic Product Price Tracker
+If you are someone who wants to track products and price changes, Clever Consumer is just the right tool for you. 
 
 Clever Consumer is a tool for tracking product prices from public product URLs. It combines a Go API, PostgreSQL-backed tracking state, a React web app, and a Chrome extension so a user can preview a product page, create a tracker, review price observations, and receive alert emails when rules match.
 

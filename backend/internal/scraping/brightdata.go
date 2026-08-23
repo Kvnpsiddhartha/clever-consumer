@@ -135,7 +135,7 @@ func (b *BrightDataAPI) HealCollector(ctx context.Context, collectorID, targetUR
 	}
 	if status == "awaiting_approval" || status == "pending_answer" || status == "user_approval" {
 		approveURL := b.apiURL("/dca/collectors/"+url.PathEscape(collectorID)+"/resume_automation_job", nil)
-		if _, err := b.apiRequest(ctx, http.MethodPost, approveURL, map[string]any{"approve": true, "auto_save": true}); err != nil {
+		if _, err := b.apiRequest(ctx, http.MethodPost, approveURL, map[string]any{"message": true, "auto_save": true}); err != nil {
 			return err
 		}
 		_, err = b.pollAIFlowStatus(ctx, collectorID, "refactor_template")
